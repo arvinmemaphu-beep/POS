@@ -162,6 +162,8 @@ const state = {
   sales: [],
   loading: false,
   toast: null,
+  tendered: '',
+  checkingOut: false,
 };
 
 function el(html){
@@ -281,6 +283,7 @@ function changeQty(id, delta){
   if(!item) return;
   item.qty += delta;
   if(item.qty <= 0){ state.cart = state.cart.filter(c=>c.id!==id); }
+  if(state.cart.length === 0){ state.tendered = ''; }
   render();
 }
 
@@ -290,6 +293,10 @@ function cartTotal(){
 
 async function checkout(){
   if(state.cart.length===0) return;
+  if(state.checkingOut) return; // prevent double-submit from fast/repeated taps
+  state.checkingOut = true;
+  render();
+
   const total = cartTotal();
   const items = state.cart.map(c=>({ id:c.id, name:c.name, price:c.price, qty:c.qty }));
   try{
@@ -310,11 +317,14 @@ async function checkout(){
       }
     }
     state.cart = [];
+    state.tendered = '';
     await fetchProducts();
     showToast('Sale recorded — ' + money(total));
   }catch(e){
     showToast('Checkout failed: ' + e.message, true);
   }
+  state.checkingOut = false;
+  render();
 }
 
 function renderSettings(){
@@ -385,6 +395,11 @@ function renderPOS(){
     </div>
   `).join('') || `<div class="empty">Cart is empty. Tap a product to add it.</div>`;
 
+  const total = cartTotal();
+  const tenderedNum = Number(state.tendered) || 0;
+  const change = tenderedNum - total;
+  const hasCart = state.cart.length > 0;
+
   return `
   <div class="grid">
     <div class="panel">
@@ -396,9 +411,19 @@ function renderPOS(){
       <div>${cartRows}</div>
       <div class="cart-total">
         <span>Total</span>
-        <span class="amt mono">${money(cartTotal())}</span>
+        <span class="amt mono">${money(total)}</span>
       </div>
-      <button class="primary" id="btn-checkout" ${state.cart.length===0?'disabled':''}>Complete sale</button>
+      ${hasCart ? `
+      <div class="field" style="margin-top:14px;">
+        <label>Amount received</label>
+        <input id="in-tendered" type="number" step="0.01" inputmode="decimal" placeholder="0.00" value="${state.tendered}">
+      </div>
+      <div class="cart-total" style="border-top:none; padding-top:0; margin-top:0;">
+        <span>Change (sukli)</span>
+        <span class="amt mono" style="color:${change < 0 ? 'var(--red)' : 'var(--green)'};">${money(Math.max(change,0))}</span>
+      </div>
+      ` : ''}
+      <button class="primary" id="btn-checkout" ${(!hasCart || state.checkingOut)?'disabled':''}>${state.checkingOut ? 'Saving...' : 'Complete sale'}</button>
     </div>
   </div>`;
 }
@@ -531,6 +556,17 @@ function render(){
 
   const checkoutBtn = document.getElementById('btn-checkout');
   if(checkoutBtn) checkoutBtn.addEventListener('click', checkout);
+
+  const tenderedInput = document.getElementById('in-tendered');
+  if(tenderedInput){
+    tenderedInput.addEventListener('input', ()=>{
+      state.tendered = tenderedInput.value;
+      render();
+      // restore focus and cursor since render() rebuilds the DOM
+      const newInput = document.getElementById('in-tendered');
+      if(newInput){ newInput.focus(); newInput.selectionStart = newInput.selectionEnd = newInput.value.length; }
+    });
+  }
 
   const addProdBtn = document.getElementById('btn-add-product');
   if(addProdBtn){
