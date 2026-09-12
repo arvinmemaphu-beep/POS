@@ -562,8 +562,18 @@ async function settleConsignment(consignment){
   const rows = [];
   for(const it of items){
     const s = state.settle[it.id] || {};
-    const sold = Math.floor(Number(s.sold) || 0);
-    const ret = Math.floor(Number(s.returned) || 0);
+    const soldRaw = String(s.sold === undefined || s.sold === null ? '' : s.sold).trim();
+    const retRaw = String(s.returned === undefined || s.returned === null ? '' : s.returned).trim();
+    if(soldRaw === '' || retRaw === ''){
+      showToast('Enter sold and returned quantities for ' + it.product_name + '.', true);
+      return;
+    }
+    const sold = Math.floor(Number(soldRaw));
+    const ret = Math.floor(Number(retRaw));
+    if(isNaN(sold) || isNaN(ret)){
+      showToast('Invalid quantity for ' + it.product_name + '.', true);
+      return;
+    }
     if(sold < 0 || ret < 0){ showToast('Quantities cannot be negative.', true); return; }
     if(sold + ret > it.qty_sent){
       showToast(it.product_name + ': sold + returned cannot be more than ' + it.qty_sent + ' sent.', true);
