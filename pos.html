@@ -235,7 +235,7 @@ async function fetchSales(){
   if(!state.connected) return;
   state.loading = true; render();
   try{
-    const res = await fetch(`${state.supaUrl}/rest/v1/sales?select=*&order=created_at.desc&limit=50`, { headers: supaHeaders() });
+    const res = await fetch(`${state.supaUrl}/rest/v1/sales?select=*,sale_items(product_name,price,qty)&order=created_at.desc&limit=50`, { headers: supaHeaders() });
     if(!res.ok) throw new Error('Failed to load sales');
     state.sales = await res.json();
   }catch(e){
@@ -324,13 +324,27 @@ async function checkout(){
   }
   state.checkingOut = true;
   render();
-  const items = state.cart.map(c=>({ id:c.id, name:c.name, price:c.price, qty:c.qty }));
   try{
-    const res = await fetch(`${state.supaUrl}/rest/v1/sales`, {
+    const saleRes = await fetch(`${state.supaUrl}/rest/v1/sales`, {
       method:'POST', headers: supaHeaders(),
-      body: JSON.stringify([{ items, total }])
+      body: JSON.stringify([{ total }])
     });
-    if(!res.ok) throw new Error('Checkout failed');
+    if(!saleRes.ok) throw new Error('Checkout failed');
+    const saleRows = await saleRes.json();
+    const saleId = saleRows[0].id;
+
+    const itemRows = state.cart.map(c => ({
+      sale_id: saleId,
+      product_id: c.id,
+      product_name: c.name,
+      price: c.price,
+      qty: c.qty
+    }));
+    const itemsRes = await fetch(`${state.supaUrl}/rest/v1/sale_items`, {
+      method:'POST', headers: supaHeaders(),
+      body: JSON.stringify(itemRows)
+    });
+    if(!itemsRes.ok) throw new Error('Failed to record sale items');
 
     for(const c of state.cart){
       const prod = state.products.find(p=>p.id===c.id);
@@ -383,17 +397,53 @@ function renderSettings(){
 
 create table sales (
   id uuid primary key default gen_random_uuid(),
-  items jsonb not null,
   total numeric not null,
+  created_at timestamptz default now()
+);
+
+create table sale_items (
+  id uuid primary key default gen_random_uuid(),
+  sale_id uuid references sales(id) on delete cascade,
+  product_id uuid references products(id),
+  product_name text not null,
+  price numeric not null,
+  qty integer not null,
   created_at timestamptz default now()
 );
 
 alter table products enable row level security;
 alter table sales enable row level security;
+alter table sale_items enable row level security;
 create policy "anon full access" on products for all using (true) with check (true);
-create policy "anon full access" on sales for all using (true) with check (true);</code>
+create policy "anon full access" on sales for all using (true) with check (true);
+create policy "anon full access" on sale_items for all using (true) with check (true);</code>
       <br>
       Get your URL and anon key from Project Settings &rarr; API. The policies above allow open read/write with the anon key &mdash; fine for a personal or single-device POS, not for a public-facing app.
+      <br><br>
+      <strong>Already have the old tables?</strong> Sales are now split into <code>sales</code> (per transaction) and <code>sale_items</code> (one row per product sold) for easier reporting. Run this in the SQL editor to switch over &mdash; note this clears existing sales history:
+      <br><br>
+      <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:6px;">drop table if exists sales cascade;
+
+create table sales (
+  id uuid primary key default gen_random_uuid(),
+  total numeric not null,
+  created_at timestamptz default now()
+);
+
+create table sale_items (
+  id uuid primary key default gen_random_uuid(),
+  sale_id uuid references sales(id) on delete cascade,
+  product_id uuid references products(id),
+  product_name text not null,
+  price numeric not null,
+  qty integer not null,
+  created_at timestamptz default now()
+);
+
+alter table sales enable row level security;
+alter table sale_items enable row level security;
+create policy "anon full access" on sales for all using (true) with check (true);
+create policy "anon full access" on sale_items for all using (true) with check (true);</code>
     </div>
   </div>`;
 }
@@ -502,7 +552,7 @@ function renderProducts(){
 function renderHistory(){
   const rows = state.sales.map(s => {
     const d = new Date(s.created_at);
-    const itemsStr = (s.items||[]).map(i=>`${i.qty}\u00D7 ${i.name}`).join(', ');
+    const itemsStr = (s.sale_items||[]).map(i=>`${i.qty}\u00D7 ${i.product_name}`).join(', ');
     return `
     <div class="sale-row">
       <div class="head">
