@@ -284,11 +284,11 @@ async function fetchCurrentUser(){
 async function loadProfile(){
   if(!state.user || !state.user.id) throw new Error('Could not identify the signed-in user.');
   const res = await fetch(state.supaUrl + '/rest/v1/profiles?select=role,full_name&user_id=eq.' + encodeURIComponent(state.user.id), { headers: supaHeaders() });
-  if(!res.ok) throw new Error('Could not load your role profile. Run the role setup SQL in Settings.');
+  if(!res.ok) throw new Error('Could not load your role profile. Run the role setup SQL in your Supabase SQL Editor first.');
   const rows = await res.json();
   const profile = rows[0];
   if(!profile || (profile.role !== 'admin' && profile.role !== 'cashier')){
-    throw new Error('No valid role is assigned to this account. Ask an Admin to add your profile.');
+    throw new Error('No valid role is assigned to this account. Add this account to the profiles table as admin or cashier in your Supabase SQL Editor.');
   }
   state.role = profile.role;
 }
