@@ -182,9 +182,9 @@ function money(n){
 
 async function loadConfig(){
   try{
-    const r = await window.storage.get('supabase-config', false);
-    if(r && r.value){
-      const cfg = JSON.parse(r.value);
+    const raw = localStorage.getItem('supabase-config');
+    if(raw){
+      const cfg = JSON.parse(raw);
       state.supaUrl = cfg.url || '';
       state.supaKey = cfg.key || '';
     }
@@ -192,7 +192,9 @@ async function loadConfig(){
 }
 
 async function saveConfig(){
-  await window.storage.set('supabase-config', JSON.stringify({url: state.supaUrl, key: state.supaKey}), false);
+  try{
+    localStorage.setItem('supabase-config', JSON.stringify({url: state.supaUrl, key: state.supaKey}));
+  }catch(e){ /* storage unavailable, config just won't persist */ }
 }
 
 function supaHeaders(){
