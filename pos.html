@@ -291,6 +291,28 @@ function cartTotal(){
   return state.cart.reduce((sum,c)=> sum + c.price*c.qty, 0);
 }
 
+function updateChangeDisplay(){
+  const total = cartTotal();
+  const tenderedNum = Number(state.tendered) || 0;
+  const change = tenderedNum - total;
+  const tenderedEntered = state.tendered !== '';
+  const insufficientAmount = !tenderedEntered || tenderedNum < total;
+
+  const changeEl = document.getElementById('change-amount');
+  if(changeEl){
+    changeEl.textContent = money(Math.max(change,0));
+    changeEl.style.color = change < 0 ? 'var(--red)' : 'var(--green)';
+  }
+  const msgEl = document.getElementById('insufficient-msg');
+  if(msgEl){
+    msgEl.textContent = insufficientAmount ? (!tenderedEntered ? 'Enter the amount received before completing the sale.' : 'Amount received is less than the total.') : '';
+  }
+  const btn = document.getElementById('btn-checkout');
+  if(btn){
+    btn.disabled = insufficientAmount || state.checkingOut || state.cart.length===0;
+  }
+}
+
 async function checkout(){
   if(state.cart.length===0) return;
   if(state.checkingOut) return; // prevent double-submit from fast/repeated taps
@@ -427,9 +449,9 @@ function renderPOS(){
       </div>
       <div class="cart-total" style="border-top:none; padding-top:0; margin-top:0;">
         <span>Change (sukli)</span>
-        <span class="amt mono" style="color:${change < 0 ? 'var(--red)' : 'var(--green)'};">${money(Math.max(change,0))}</span>
+        <span class="amt mono" id="change-amount" style="color:${change < 0 ? 'var(--red)' : 'var(--green)'};">${money(Math.max(change,0))}</span>
       </div>
-      ${insufficientAmount ? `<div style="color:var(--red); font-size:12.5px; margin-top:8px;">${!tenderedEntered ? 'Enter the amount received before completing the sale.' : 'Amount received is less than the total.'}</div>` : ''}
+      <div id="insufficient-msg" style="color:var(--red); font-size:12.5px; margin-top:8px;">${insufficientAmount ? (!tenderedEntered ? 'Enter the amount received before completing the sale.' : 'Amount received is less than the total.') : ''}</div>
       ` : ''}
       <button class="primary" id="btn-checkout" ${!canCheckout?'disabled':''}>${state.checkingOut ? 'Saving...' : 'Complete sale'}</button>
     </div>
@@ -569,10 +591,7 @@ function render(){
   if(tenderedInput){
     tenderedInput.addEventListener('input', ()=>{
       state.tendered = tenderedInput.value;
-      render();
-      // restore focus and cursor since render() rebuilds the DOM
-      const newInput = document.getElementById('in-tendered');
-      if(newInput){ newInput.focus(); newInput.selectionStart = newInput.selectionEnd = newInput.value.length; }
+      updateChangeDisplay();
     });
   }
 
