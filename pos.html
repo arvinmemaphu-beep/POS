@@ -138,6 +138,12 @@
   .setup-note{
     font-size: 12.5px; color: var(--ink-dim); line-height:1.6; margin-top: 10px;
   }
+  .auth-shell{ display:flex; justify-content:center; padding-top:24px; }
+  .auth-card{ width:min(100%, 440px); }
+  .auth-card h2{ color:var(--ink); }
+  .auth-error{ color:#F0B3AB; border:1px solid var(--red); padding:10px; margin-top:12px; font-size:13px; line-height:1.45; }
+  .user-bar{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; justify-content:flex-end; color:var(--ink-dim); font-size:12px; }
+  .role-badge{ display:inline-block; border:1px solid var(--gold-dim); color:var(--gold); border-radius:10px; padding:2px 8px; text-transform:capitalize; }
   .setup-note code{
     background: var(--bg); padding: 1px 5px; border-radius: 2px; color: var(--gold);
   }
@@ -169,6 +175,12 @@ const state = {
   tab: 'pos',
   supaUrl: '',
   supaKey: '',
+  session: null,
+  user: null,
+  role: null,
+  loginEmail: '',
+  authError: '',
+  authLoading: false,
   connected: false,
   products: [],
   cart: [], // {id, name, price, qty}
@@ -214,7 +226,9 @@ async function loadConfig(){
       state.supaUrl = cfg.url || '';
       state.supaKey = cfg.key || '';
     }
-  }catch(e){ /* no config yet */ }
+    const savedSession = sessionStorage.getItem('supa-session');
+    if(savedSession) state.session = JSON.parse(savedSession);
+  }catch(e){ /* no config or session yet */ }
 }
 
 async function saveConfig(){
@@ -223,23 +237,139 @@ async function saveConfig(){
   }catch(e){ /* storage unavailable, config just won't persist */ }
 }
 
+async function saveSession(){
+  try{
+    if(state.session) sessionStorage.setItem('supa-session', JSON.stringify(state.session));
+    else sessionStorage.removeItem('supa-session');
+  }catch(e){ /* session storage unavailable */ }
+}
+
+function clearSession(){
+  try{ sessionStorage.removeItem('supa-session'); }catch(e){ /* ignore */ }
+}
+
+function escapeHtml(value){
+  return String(value === undefined || value === null ? '' : value)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/\"/g, '&quot;').replace(/'/g, '&#039;');
+}
+
 function supaHeaders(){
   return {
     'apikey': state.supaKey,
-    'Authorization': 'Bearer ' + state.supaKey,
+    'Authorization': 'Bearer ' + (state.session && state.session.access_token ? state.session.access_token : state.supaKey),
     'Content-Type': 'application/json',
     'Prefer': 'return=representation'
   };
 }
 
 async function testConnection(){
-  if(!state.supaUrl || !state.supaKey){ state.connected = false; return; }
+  if(!state.supaUrl || !state.supaKey || !state.session || !state.session.access_token){ state.connected = false; return false; }
   try{
-    const res = await fetch(`${state.supaUrl}/rest/v1/products?select=id&limit=1`, { headers: supaHeaders() });
+    const res = await fetch(state.supaUrl + '/rest/v1/products?select=id&limit=1', { headers: supaHeaders() });
     state.connected = res.ok;
+    return state.connected;
   }catch(e){
     state.connected = false;
+    return false;
   }
+}
+
+async function fetchCurrentUser(){
+  const res = await fetch(state.supaUrl + '/auth/v1/user', { headers: supaHeaders() });
+  if(!res.ok) throw new Error('Your Supabase session has expired. Please sign in again.');
+  state.user = await res.json();
+}
+
+async function loadProfile(){
+  if(!state.user || !state.user.id) throw new Error('Could not identify the signed-in user.');
+  const res = await fetch(state.supaUrl + '/rest/v1/profiles?select=role,full_name&user_id=eq.' + encodeURIComponent(state.user.id), { headers: supaHeaders() });
+  if(!res.ok) throw new Error('Could not load your role profile. Run the role setup SQL in Settings.');
+  const rows = await res.json();
+  const profile = rows[0];
+  if(!profile || (profile.role !== 'admin' && profile.role !== 'cashier')){
+    throw new Error('No valid role is assigned to this account. Ask an Admin to add your profile.');
+  }
+  state.role = profile.role;
+}
+
+async function restoreAuth(){
+  if(!state.session || !state.session.access_token) return false;
+  try{
+    await fetchCurrentUser();
+    await loadProfile();
+    return await testConnection();
+  }catch(e){
+    clearSession();
+    state.session = null;
+    state.user = null;
+    state.role = null;
+    state.connected = false;
+    return false;
+  }
+}
+
+async function login(email, password){
+  if(!email || !password){ state.authError = 'Enter your email and password.'; render(); return; }
+  state.authLoading = true;
+  state.authError = '';
+  render();
+  let welcome = '';
+  try{
+    const res = await fetch(state.supaUrl + '/auth/v1/token?grant_type=password', {
+      method:'POST',
+      headers:{ 'apikey': state.supaKey, 'Content-Type':'application/json' },
+      body: JSON.stringify({ email, password })
+    });
+    const payload = await res.json().catch(()=>({}));
+    if(!res.ok) throw new Error(payload.error_description || payload.msg || 'Sign in failed. Check your email and password.');
+    state.session = payload;
+    await saveSession();
+    await fetchCurrentUser();
+    await loadProfile();
+    if(!await testConnection()) throw new Error('Signed in, but the POS tables could not be reached. Check your Supabase setup.');
+    state.tab = 'pos';
+    await fetchProducts();
+    welcome = 'Signed in as ' + (state.role === 'admin' ? 'Admin' : 'Cashier') + '.';
+  }catch(e){
+    clearSession();
+    state.session = null;
+    state.user = null;
+    state.role = null;
+    state.connected = false;
+    state.authError = e.message || 'Sign in failed.';
+  }finally{
+    state.authLoading = false;
+    render();
+  }
+  if(welcome) showToast(welcome);
+}
+
+function logout(){
+  clearSession();
+  state.session = null;
+  state.user = null;
+  state.role = null;
+  state.connected = false;
+  state.tab = 'pos';
+  state.cart = [];
+  state.tendered = '';
+  state.authError = '';
+  render();
+}
+
+function isAdmin(){ return state.role === 'admin'; }
+
+function switchTab(tab){
+  if(tab === 'settings' && !isAdmin()){
+    showToast('Settings is available to Admin only.', true);
+    return;
+  }
+  state.tab = tab;
+  render();
+  if(tab === 'history') fetchSales();
+  if(tab === 'items') fetchSaleItems();
+  if(tab === 'consign') fetchConsignments();
 }
 
 async function fetchProducts(){
@@ -630,7 +760,7 @@ async function settleConsignment(consignment){
   state.busy = false; render();
 }
 
-function renderSettings(){
+function renderAdminSettings(){
   return `
   <div class="panel" style="max-width:520px;">
     <h2>Connect to Supabase</h2>
@@ -677,9 +807,9 @@ create table sale_items (
 alter table products enable row level security;
 alter table sales enable row level security;
 alter table sale_items enable row level security;
-create policy "anon full access" on products for all using (true) with check (true);
-create policy "anon full access" on sales for all using (true) with check (true);
-create policy "anon full access" on sale_items for all using (true) with check (true);</code>
+create policy "authenticated full access" on products for all to authenticated using (true) with check (true);
+create policy "authenticated full access" on sales for all to authenticated using (true) with check (true);
+create policy "authenticated full access" on sale_items for all to authenticated using (true) with check (true);</code>
       <br>
       <strong>Consignment tables</strong> &mdash; run this too so the Consign tab works:
       <br><br>
@@ -706,10 +836,10 @@ create table consignment_items (
 
 alter table consignments enable row level security;
 alter table consignment_items enable row level security;
-create policy "anon full access" on consignments for all using (true) with check (true);
-create policy "anon full access" on consignment_items for all using (true) with check (true);</code>
+create policy "authenticated full access" on consignments for all to authenticated using (true) with check (true);
+create policy "authenticated full access" on consignment_items for all to authenticated using (true) with check (true);</code>
       <br>
-      Get your URL and anon key from Project Settings &rarr; API. The policies above allow open read/write with the anon key &mdash; fine for a personal or single-device POS, not for a public-facing app.
+      Get your URL and anon key from Project Settings &rarr; API. The policies above require a signed-in Supabase Auth user. Run the User access roles SQL below, then sign in with an account that has an admin or cashier profile.
       <br><br>
       <strong>Already have the old tables?</strong> Sales are now split into <code>sales</code> (per transaction) and <code>sale_items</code> (one row per product sold) for easier reporting. Run this in the SQL editor to switch over &mdash; note this clears existing sales history:
       <br><br>
@@ -733,11 +863,79 @@ create table sale_items (
 
 alter table sales enable row level security;
 alter table sale_items enable row level security;
-create policy "anon full access" on sales for all using (true) with check (true);
-create policy "anon full access" on sale_items for all using (true) with check (true);</code>
+create policy "authenticated full access" on sales for all to authenticated using (true) with check (true);
+create policy "authenticated full access" on sale_items for all to authenticated using (true) with check (true);</code>
+
+      <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
+        <h2>User access roles</h2>
+        <div class="setup-note">This app uses Supabase Auth. Create users in Supabase Authentication, then add their role with the SQL below. Your account should be <strong>admin</strong>; cashiers should be <strong>cashier</strong>.</div>
+        <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">create table if not exists profiles (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  full_name text,
+  role text not null default 'cashier' check (role in ('admin','cashier')),
+  created_at timestamptz default now()
+);
+
+alter table profiles enable row level security;
+drop policy if exists "users can read own profile" on profiles;
+create policy "users can read own profile" on profiles for select to authenticated using (auth.uid() = user_id);
+
+-- Replace this UUID with your Supabase Auth user id:
+insert into profiles (user_id, full_name, role)
+values ('YOUR_AUTH_USER_UUID', 'Arvin', 'admin')
+on conflict (user_id) do update set role = excluded.role;
+
+-- Add each cashier using their Auth user id:
+-- insert into profiles (user_id, full_name, role)
+-- values ('CASHIER_AUTH_USER_UUID', 'Cashier name', 'cashier');
+
+-- Lock the existing data tables to signed-in users:
+ drop policy if exists "anon full access" on products;
+ drop policy if exists "authenticated full access" on products;
+ create policy "authenticated full access" on products for all to authenticated using (true) with check (true);
+ drop policy if exists "anon full access" on sales;
+ drop policy if exists "authenticated full access" on sales;
+ create policy "authenticated full access" on sales for all to authenticated using (true) with check (true);
+ drop policy if exists "anon full access" on sale_items;
+ drop policy if exists "authenticated full access" on sale_items;
+ create policy "authenticated full access" on sale_items for all to authenticated using (true) with check (true);
+ drop policy if exists "anon full access" on consignments;
+ drop policy if exists "authenticated full access" on consignments;
+ create policy "authenticated full access" on consignments for all to authenticated using (true) with check (true);
+ drop policy if exists "anon full access" on consignment_items;
+ drop policy if exists "authenticated full access" on consignment_items;
+ create policy "authenticated full access" on consignment_items for all to authenticated using (true) with check (true);</code>
+        <div class="setup-note">After running this SQL, sign out and sign in again. The Settings tab is hidden and blocked for Cashier accounts.</div>
+      </div>
     </div>
   </div>`;
 }
+
+
+
+function renderSetup(){
+  return '<div class="auth-shell"><div class="panel auth-card">' +
+    '<h2>Connect to Supabase</h2>' +
+    '<div class="field"><label>Project URL</label><input id="in-url" placeholder="https://xxxx.supabase.co" value="' + escapeHtml(state.supaUrl) + '"></div>' +
+    '<div class="field"><label>Anon public key</label><input id="in-key" placeholder="eyJhbGciOi..." value="' + escapeHtml(state.supaKey) + '"></div>' +
+    '<button class="primary" id="btn-connect" style="width:auto; padding:9px 18px;">Save connection</button>' +
+    '<div class="setup-note">After connecting, sign in with a Supabase Auth account. The account must have a row in the <code>profiles</code> table with role <code>admin</code> or <code>cashier</code>.</div>' +
+  '</div></div>';
+}
+
+function renderLogin(){
+  return '<div class="auth-shell"><div class="panel auth-card">' +
+    '<h2>Sign in to CCFACO POS</h2>' +
+    '<div class="setup-note">Use your Supabase Auth email and password. Your access level comes from your profile role.</div>' +
+    '<div class="field" style="margin-top:16px;"><label>Email</label><input id="in-email" type="email" autocomplete="username" placeholder="you@example.com" value="' + escapeHtml(state.loginEmail) + '"></div>' +
+    '<div class="field"><label>Password</label><input id="in-password" type="password" autocomplete="current-password" placeholder="Your password"></div>' +
+    '<button class="primary" id="btn-login">' + (state.authLoading ? 'Signing in...' : 'Sign in') + '</button>' +
+    (state.authError ? '<div class="auth-error">' + escapeHtml(state.authError) + '</div>' : '') +
+    '<button class="ghost" id="btn-change-config" style="width:100%; margin-top:10px;">Change Supabase connection</button>' +
+  '</div></div>';
+}
+
+function renderSettings(){ return renderAdminSettings(); }
 
 function renderPOS(){
   const rows = state.products.map(p => `
@@ -1040,15 +1238,18 @@ function renderConsign(){
 
 function render(){
   const app = document.getElementById('app');
+  if(state.connected && state.tab === 'settings' && !isAdmin()) state.tab = 'pos';
   let body;
-  if(!state.connected){
-    body = renderSettings();
+  if(!state.supaUrl || !state.supaKey){
+    body = renderSetup();
+  } else if(!state.connected){
+    body = renderLogin();
   } else if(state.tab === 'pos'){
     body = renderPOS();
   } else if(state.tab === 'products'){
     body = renderProducts();
   } else if(state.tab === 'settings'){
-    body = renderSettings();
+    body = isAdmin() ? renderSettings() : renderPOS();
   } else if(state.tab === 'items'){
     body = renderSaleItems();
   } else if(state.tab === 'consign'){
@@ -1057,49 +1258,82 @@ function render(){
     body = renderHistory();
   }
 
-  app.innerHTML = `
-    <header class="top">
-      <div>
-        <h1 class="serif">CCFACO POS</h1>
-        <div class="sub">Design by: Arvin B.</div>
-      </div>
-      ${state.connected ? `
-      <nav class="tabs">
-        <button data-tab="pos" class="${state.tab==='pos'?'active':''}">Sell</button>
-        <button data-tab="products" class="${state.tab==='products'?'active':''}">Products</button>
-        <button data-tab="history" class="${state.tab==='history'?'active':''}">History</button>
-        <button data-tab="items" class="${state.tab==='items'?'active':''}">Sale Items</button>
-        <button data-tab="consign" class="${state.tab==='consign'?'active':''}">Consign</button>
-        <button data-tab="settings" class="${state.tab==='settings'?'active':''}">Settings</button>
-      </nav>` : ''}
-    </header>
-    ${body}
-    ${state.toast ? `<div class="toast ${state.toast.isErr?'err':''}">${state.toast.msg}</div>` : ''}
-  `;
+  const active = tab => state.tab === tab ? 'active' : '';
+  const nav = state.connected ?
+    '<nav class="tabs">' +
+      '<button data-tab="pos" class="' + active('pos') + '">Sell</button>' +
+      '<button data-tab="products" class="' + active('products') + '">Products</button>' +
+      '<button data-tab="history" class="' + active('history') + '">History</button>' +
+      '<button data-tab="items" class="' + active('items') + '">Sale Items</button>' +
+      '<button data-tab="consign" class="' + active('consign') + '">Consign</button>' +
+      (isAdmin() ? '<button data-tab="settings" class="' + active('settings') + '">Settings</button>' : '') +
+    '</nav>' : '';
+  const userBar = state.connected ?
+    '<div class="user-bar"><span class="role-badge">' + escapeHtml(state.role) + '</span><span>' + escapeHtml(state.user && state.user.email ? state.user.email : 'Signed in') + '</span><button class="ghost" id="btn-logout" style="padding:5px 9px;">Sign out</button></div>' : '';
+
+  app.innerHTML =
+    '<header class="top"><div><h1 class="serif">CCFACO POS</h1><div class="sub">Design by: Arvin B.</div></div>' +
+    '<div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px;">' + nav + userBar + '</div></header>' +
+    body +
+    (state.toast ? '<div class="toast ' + (state.toast.isErr ? 'err' : '') + '">' + escapeHtml(state.toast.msg) + '</div>' : '');
 
   // wire events
   app.querySelectorAll('nav.tabs button').forEach(b=>{
-    b.addEventListener('click', ()=>{ state.tab = b.dataset.tab; render();
-      if(state.tab==='history') fetchSales();
-      if(state.tab==='items') fetchSaleItems();
-      if(state.tab==='consign') fetchConsignments();
-    });
+    b.addEventListener('click', ()=> switchTab(b.dataset.tab));
   });
 
   const connectBtn = document.getElementById('btn-connect');
   if(connectBtn){
     connectBtn.addEventListener('click', async ()=>{
+      const previousUrl = state.supaUrl;
+      const previousKey = state.supaKey;
       state.supaUrl = document.getElementById('in-url').value.trim().replace(/\/$/,'');
       state.supaKey = document.getElementById('in-key').value.trim();
       await saveConfig();
-      await testConnection();
-      if(state.connected){
-        state.tab = 'pos';
-        await fetchProducts();
-        showToast('Connected to Supabase.');
-      } else {
-        showToast('Could not connect — check your URL and key.', true);
+      const changed = previousUrl !== state.supaUrl || previousKey !== state.supaKey;
+      if(changed || !state.connected){
+        clearSession();
+        state.session = null;
+        state.user = null;
+        state.role = null;
+        state.connected = false;
+        state.authError = '';
+        render();
+        showToast('Supabase connection saved. Sign in to continue.');
+      }else{
+        showToast('Supabase connection saved.');
       }
+    });
+  }
+
+  const loginBtn = document.getElementById('btn-login');
+  if(loginBtn){
+    loginBtn.addEventListener('click', async ()=>{
+      state.loginEmail = document.getElementById('in-email').value.trim();
+      const password = document.getElementById('in-password').value;
+      await login(state.loginEmail, password);
+    });
+  }
+  const emailInput = document.getElementById('in-email');
+  if(emailInput) emailInput.addEventListener('keydown', ev=>{ if(ev.key === 'Enter') document.getElementById('in-password').focus(); });
+  const passwordInput = document.getElementById('in-password');
+  if(passwordInput) passwordInput.addEventListener('keydown', ev=>{ if(ev.key === 'Enter') loginBtn.click(); });
+
+  const logoutBtn = document.getElementById('btn-logout');
+  if(logoutBtn) logoutBtn.addEventListener('click', logout);
+
+  const changeConfigBtn = document.getElementById('btn-change-config');
+  if(changeConfigBtn){
+    changeConfigBtn.addEventListener('click', ()=>{
+      clearSession();
+      localStorage.removeItem('supabase-config');
+      state.supaUrl = '';
+      state.supaKey = '';
+      state.session = null;
+      state.user = null;
+      state.role = null;
+      state.connected = false;
+      state.authError = '';
       render();
     });
   }
@@ -1216,10 +1450,7 @@ function render(){
 
 async function init(){
   await loadConfig();
-  await testConnection();
-  if(state.connected){
-    await fetchProducts();
-  }
+  if(state.supaUrl && state.supaKey) await restoreAuth();
   render();
 }
 
