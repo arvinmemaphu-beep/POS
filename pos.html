@@ -146,6 +146,19 @@
   .del-x{ color: var(--red); cursor:pointer; font-size:12px; margin-left:8px; }
   .icon-btn{ background:none; border:none; color:var(--ink-dim); cursor:pointer; font-size:16px; padding:2px 6px; }
   .icon-btn:hover{ color: var(--red); }
+
+  .qty-input{ width:56px; text-align:center; padding:5px 4px; font-size:13px; }
+  .num-sm{ width:70px; padding:5px 6px; font-size:13px; text-align:center; }
+  .tag{ display:inline-block; font-size:11px; padding:2px 8px; border-radius:10px; border:1px solid var(--line); color:var(--ink-dim); }
+  .tag.open{ border-color: var(--gold-dim); color: var(--gold); }
+  .tag.closed{ border-color: var(--green); color: var(--green); }
+  .cons-item{ display:flex; flex-wrap:wrap; align-items:flex-end; gap:10px; padding:9px 0; border-bottom:1px solid var(--line); font-size:13px; }
+  .cons-item:last-child{ border-bottom:none; }
+  .cons-item .nm{ flex:1; min-width:130px; }
+  .cons-item .sub{ color:var(--ink-dim); font-size:11.5px; margin-top:2px; }
+  select{ width:100%; background:var(--bg); border:1px solid var(--line); color:var(--ink);
+    padding:9px 10px; border-radius:var(--radius); font-size:14px; font-family:inherit; }
+  select:focus{ outline:none; border-color: var(--gold-dim); }
 </style>
 </head>
 <body>
@@ -165,6 +178,16 @@ const state = {
   toast: null,
   tendered: '',
   checkingOut: false,
+  editing: null,        // {id, name, price} product being edited
+  restockQty: '',
+  consignments: [],
+  consignDraft: [],     // {product_id, name, price, qty}
+  consignee: '',
+  consignNote: '',
+  consignPick: '',
+  consignPickQty: '',
+  settle: {},           // item_id -> {sold, returned}
+  busy: false,
 };
 
 function el(html){
@@ -295,10 +318,37 @@ function addToCart(product){
 function changeQty(id, delta){
   const item = state.cart.find(c=>c.id===id);
   if(!item) return;
-  item.qty += delta;
+  item.qty = (Number(item.qty)||0) + delta;
   if(item.qty <= 0){ state.cart = state.cart.filter(c=>c.id!==id); }
   if(state.cart.length === 0){ state.tendered = ''; }
   render();
+}
+
+// Typed quantity: update numbers live without re-rendering (keeps focus in the input)
+function setCartQty(id, raw){
+  const item = state.cart.find(c=>c.id===id);
+  if(!item) return;
+  const n = Math.floor(Number(raw));
+  item.qty = (raw === '' || isNaN(n) || n < 0) ? 0 : n;
+  updateCartDisplay();
+}
+
+function commitCartQty(id){
+  const item = state.cart.find(c=>c.id===id);
+  if(!item) return;
+  if(!item.qty || item.qty <= 0){ state.cart = state.cart.filter(c=>c.id!==id); }
+  if(state.cart.length === 0){ state.tendered = ''; }
+  render();
+}
+
+function updateCartDisplay(){
+  for(const c of state.cart){
+    const lineEl = document.querySelector(`[data-line="${c.id}"]`);
+    if(lineEl) lineEl.textContent = money(c.price * (Number(c.qty)||0));
+  }
+  const totalEl = document.getElementById('cart-total-amt');
+  if(totalEl) totalEl.textContent = money(cartTotal());
+  updateChangeDisplay();
 }
 
 function cartTotal(){
@@ -381,6 +431,195 @@ async function checkout(){
   render();
 }
 
+/* ---------- Edit product / Restock ---------- */
+
+async function updateProduct(id, name, price){
+  if(!name){ showToast('Enter a product name.', true); return; }
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/products?id=eq.${id}`, {
+      method:'PATCH', headers: supaHeaders(),
+      body: JSON.stringify({ name, price: Number(price) })
+    });
+    if(!res.ok) throw new Error('Update failed');
+    state.editing = null;
+    await fetchProducts();
+    showToast('Product updated.');
+  }catch(e){
+    showToast('Could not update product: ' + e.message, true);
+  }
+}
+
+async function restockProduct(id, addQty){
+  const prod = state.products.find(p=>p.id===id);
+  if(!prod) return;
+  const add = Math.floor(Number(addQty));
+  if(!add || add <= 0){ showToast('Enter how many pieces to add.', true); return; }
+  try{
+    const newStock = (prod.stock||0) + add;
+    const res = await fetch(`${state.supaUrl}/rest/v1/products?id=eq.${id}`, {
+      method:'PATCH', headers: supaHeaders(),
+      body: JSON.stringify({ stock: newStock })
+    });
+    if(!res.ok) throw new Error('Restock failed');
+    state.restockQty = '';
+    await fetchProducts();
+    showToast('+' + add + ' ' + prod.name + ' \u2014 ' + newStock + ' in stock now.');
+  }catch(e){
+    showToast('Could not restock: ' + e.message, true);
+  }
+}
+
+async function setStock(id, newStock){
+  const res = await fetch(`${state.supaUrl}/rest/v1/products?id=eq.${id}`, {
+    method:'PATCH', headers: supaHeaders(),
+    body: JSON.stringify({ stock: Math.max(0, Math.floor(newStock)) })
+  });
+  if(!res.ok) throw new Error('Could not update stock');
+}
+
+/* ---------- Consignment ---------- */
+
+async function fetchConsignments(){
+  if(!state.connected) return;
+  state.loading = true; render();
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/consignments?select=*,consignment_items(*)&order=created_at.desc&limit=50`, { headers: supaHeaders() });
+    if(!res.ok) throw new Error('Failed to load consignments');
+    state.consignments = await res.json();
+  }catch(e){
+    showToast('Could not load consignments: ' + e.message, true);
+  }
+  state.loading = false; render();
+}
+
+function addConsignDraft(){
+  const p = state.products.find(x=>x.id===state.consignPick);
+  const qty = Math.floor(Number(state.consignPickQty));
+  if(!p){ showToast('Pick a product first.', true); return; }
+  if(!qty || qty <= 0){ showToast('Enter how many pieces to send.', true); return; }
+  const already = state.consignDraft.filter(d=>d.product_id===p.id).reduce((s,d)=>s+d.qty,0);
+  if(qty + already > (p.stock||0)){ showToast('Only ' + (p.stock||0) + ' in stock for ' + p.name + '.', true); return; }
+  const existing = state.consignDraft.find(d=>d.product_id===p.id);
+  if(existing){ existing.qty += qty; }
+  else{ state.consignDraft.push({ product_id: p.id, name: p.name, price: p.price, qty }); }
+  state.consignPickQty = '';
+  render();
+}
+
+function consignDraftTotal(){
+  return state.consignDraft.reduce((s,d)=> s + d.price*d.qty, 0);
+}
+
+async function sendConsignment(){
+  if(state.busy) return;
+  const consignee = state.consignee.trim();
+  if(!consignee){ showToast('Enter who receives the items.', true); return; }
+  if(state.consignDraft.length === 0){ showToast('Add at least one item.', true); return; }
+  state.busy = true; render();
+  try{
+    const cRes = await fetch(`${state.supaUrl}/rest/v1/consignments`, {
+      method:'POST', headers: supaHeaders(),
+      body: JSON.stringify([{ consignee, note: state.consignNote.trim() || null, status: 'open' }])
+    });
+    if(!cRes.ok) throw new Error('Could not create consignment');
+    const consignmentId = (await cRes.json())[0].id;
+
+    const itemRows = state.consignDraft.map(d => ({
+      consignment_id: consignmentId,
+      product_id: d.product_id,
+      product_name: d.name,
+      price: d.price,
+      qty_sent: d.qty,
+      qty_sold: 0,
+      qty_returned: 0
+    }));
+    const iRes = await fetch(`${state.supaUrl}/rest/v1/consignment_items`, {
+      method:'POST', headers: supaHeaders(), body: JSON.stringify(itemRows)
+    });
+    if(!iRes.ok) throw new Error('Could not save consignment items');
+
+    // items leave the shop, so take them out of stock
+    for(const d of state.consignDraft){
+      const prod = state.products.find(p=>p.id===d.product_id);
+      if(prod) await setStock(d.product_id, (prod.stock||0) - d.qty);
+    }
+
+    state.consignDraft = [];
+    state.consignee = '';
+    state.consignNote = '';
+    await fetchProducts();
+    await fetchConsignments();
+    showToast('Consignment sent to ' + consignee + '.');
+  }catch(e){
+    showToast('Could not send consignment: ' + e.message, true);
+  }
+  state.busy = false; render();
+}
+
+async function settleConsignment(consignment){
+  if(state.busy) return;
+  const items = consignment.consignment_items || [];
+  const rows = [];
+  for(const it of items){
+    const s = state.settle[it.id] || {};
+    const sold = Math.floor(Number(s.sold) || 0);
+    const ret = Math.floor(Number(s.returned) || 0);
+    if(sold < 0 || ret < 0){ showToast('Quantities cannot be negative.', true); return; }
+    if(sold + ret > it.qty_sent){
+      showToast(it.product_name + ': sold + returned cannot be more than ' + it.qty_sent + ' sent.', true);
+      return;
+    }
+    rows.push({ it, sold, ret });
+  }
+  const soldTotal = rows.reduce((s,r)=> s + r.it.price*r.sold, 0);
+  state.busy = true; render();
+  try{
+    // record the sold pieces as a real sale so revenue reports stay correct
+    if(soldTotal > 0){
+      const saleRes = await fetch(`${state.supaUrl}/rest/v1/sales`, {
+        method:'POST', headers: supaHeaders(), body: JSON.stringify([{ total: soldTotal }])
+      });
+      if(!saleRes.ok) throw new Error('Could not record the sale');
+      const saleId = (await saleRes.json())[0].id;
+      const saleItems = rows.filter(r=>r.sold>0).map(r=>({
+        sale_id: saleId, product_id: r.it.product_id, product_name: r.it.product_name,
+        price: r.it.price, qty: r.sold
+      }));
+      const siRes = await fetch(`${state.supaUrl}/rest/v1/sale_items`, {
+        method:'POST', headers: supaHeaders(), body: JSON.stringify(saleItems)
+      });
+      if(!siRes.ok) throw new Error('Could not record sale items');
+    }
+
+    for(const r of rows){
+      const pRes = await fetch(`${state.supaUrl}/rest/v1/consignment_items?id=eq.${r.it.id}`, {
+        method:'PATCH', headers: supaHeaders(),
+        body: JSON.stringify({ qty_sold: r.sold, qty_returned: r.ret })
+      });
+      if(!pRes.ok) throw new Error('Could not update the tally');
+      // returned pieces go back to shop stock
+      if(r.ret > 0){
+        const prod = state.products.find(p=>p.id===r.it.product_id);
+        if(prod) await setStock(r.it.product_id, (prod.stock||0) + r.ret);
+      }
+    }
+
+    const cRes = await fetch(`${state.supaUrl}/rest/v1/consignments?id=eq.${consignment.id}`, {
+      method:'PATCH', headers: supaHeaders(),
+      body: JSON.stringify({ status: 'closed', settled_at: new Date().toISOString() })
+    });
+    if(!cRes.ok) throw new Error('Could not close the consignment');
+
+    state.settle = {};
+    await fetchProducts();
+    await fetchConsignments();
+    showToast('Consignment settled \u2014 sold ' + money(soldTotal) + '.');
+  }catch(e){
+    showToast('Could not settle: ' + e.message, true);
+  }
+  state.busy = false; render();
+}
+
 function renderSettings(){
   return `
   <div class="panel" style="max-width:520px;">
@@ -432,6 +671,34 @@ create policy "anon full access" on products for all using (true) with check (tr
 create policy "anon full access" on sales for all using (true) with check (true);
 create policy "anon full access" on sale_items for all using (true) with check (true);</code>
       <br>
+      <strong>Consignment tables</strong> &mdash; run this too so the Consign tab works:
+      <br><br>
+      <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:6px;">create table consignments (
+  id uuid primary key default gen_random_uuid(),
+  consignee text not null,
+  note text,
+  status text not null default 'open',
+  settled_at timestamptz,
+  created_at timestamptz default now()
+);
+
+create table consignment_items (
+  id uuid primary key default gen_random_uuid(),
+  consignment_id uuid references consignments(id) on delete cascade,
+  product_id uuid references products(id),
+  product_name text not null,
+  price numeric not null,
+  qty_sent integer not null,
+  qty_sold integer not null default 0,
+  qty_returned integer not null default 0,
+  created_at timestamptz default now()
+);
+
+alter table consignments enable row level security;
+alter table consignment_items enable row level security;
+create policy "anon full access" on consignments for all using (true) with check (true);
+create policy "anon full access" on consignment_items for all using (true) with check (true);</code>
+      <br>
       Get your URL and anon key from Project Settings &rarr; API. The policies above allow open read/write with the anon key &mdash; fine for a personal or single-device POS, not for a public-facing app.
       <br><br>
       <strong>Already have the old tables?</strong> Sales are now split into <code>sales</code> (per transaction) and <code>sale_items</code> (one row per product sold) for easier reporting. Run this in the SQL editor to switch over &mdash; note this clears existing sales history:
@@ -478,10 +745,10 @@ function renderPOS(){
       <div class="name">${c.name}</div>
       <div class="qty-controls">
         <button data-dec="${c.id}">\u2212</button>
-        <span class="mono">${c.qty}</span>
+        <input class="qty-input mono" data-qty="${c.id}" type="number" min="0" step="1" inputmode="numeric" value="${c.qty}">
         <button data-inc="${c.id}">+</button>
       </div>
-      <div class="mono" style="width:70px; text-align:right;">${money(c.price*c.qty)}</div>
+      <div class="mono" data-line="${c.id}" style="width:70px; text-align:right;">${money(c.price*(Number(c.qty)||0))}</div>
     </div>
   `).join('') || `<div class="empty">Cart is empty. Tap a product to add it.</div>`;
 
@@ -504,7 +771,7 @@ function renderPOS(){
       <div>${cartRows}</div>
       <div class="cart-total">
         <span>Total</span>
-        <span class="amt mono">${money(total)}</span>
+        <span class="amt mono" id="cart-total-amt">${money(total)}</span>
       </div>
       ${hasCart ? `
       <div class="field" style="margin-top:14px;">
@@ -524,7 +791,7 @@ function renderPOS(){
 
 function renderProducts(){
   const rows = state.products.map(p => `
-    <div class="product-row">
+    <div class="product-row" data-edit="${p.id}">
       <div>
         <div class="name">${p.name}</div>
         <div class="meta">${p.stock} in stock</div>
@@ -536,9 +803,37 @@ function renderProducts(){
     </div>
   `).join('') || `<div class="empty">No products yet.</div>`;
 
-  return `
-  <div class="grid">
-    <div class="panel">
+  const ed = state.editing;
+  const current = ed ? state.products.find(p=>p.id===ed.id) : null;
+
+  const leftPanel = ed ? `
+      <h2>Edit ${ed.name}</h2>
+      <div class="field">
+        <label>Name</label>
+        <input id="ep-name" value="${ed.name}">
+      </div>
+      <div class="field">
+        <label>Price</label>
+        <input id="ep-price" type="number" step="0.01" value="${ed.price}">
+      </div>
+      <button class="primary" id="btn-save-product">Save changes</button>
+      <div style="border-top:1px solid var(--line); margin:18px 0 14px;"></div>
+      <h2>Restock</h2>
+      <div class="meta" style="font-size:12px; color:var(--ink-dim); margin-bottom:10px;">
+        Current stock: <span class="mono">${current ? current.stock : 0}</span>. Stock goes down automatically on every sale.
+      </div>
+      <div class="row2">
+        <div class="field">
+          <label>Add pieces</label>
+          <input id="rs-qty" type="number" min="1" step="1" placeholder="0" value="${state.restockQty}">
+        </div>
+        <div class="field">
+          <label>&nbsp;</label>
+          <button class="ghost" id="btn-restock" style="width:100%; padding:9px;">Add to stock</button>
+        </div>
+      </div>
+      <button class="ghost" id="btn-cancel-edit" style="width:100%;">Done</button>
+  ` : `
       <h2>Add a product</h2>
       <div class="field">
         <label>Name</label>
@@ -550,14 +845,18 @@ function renderProducts(){
           <input id="np-price" type="number" step="0.01" placeholder="0.00">
         </div>
         <div class="field">
-          <label>Stock</label>
+          <label>Starting stock</label>
           <input id="np-stock" type="number" placeholder="0">
         </div>
       </div>
       <button class="primary" id="btn-add-product">Add product</button>
-    </div>
+  `;
+
+  return `
+  <div class="grid">
+    <div class="panel">${leftPanel}</div>
     <div class="panel">
-      <h2>All products</h2>
+      <h2>All products <span style="font-weight:400; color:var(--ink-dim);">\u2014 tap one to edit or restock</span></h2>
       <div class="product-list">${rows}</div>
     </div>
   </div>`;
@@ -625,6 +924,110 @@ function renderSaleItems(){
   </div>`;
 }
 
+function renderConsign(){
+  const opts = ['<option value="">Pick a product\u2026</option>'].concat(
+    state.products.map(p=>`<option value="${p.id}" ${state.consignPick===p.id?'selected':''}>${p.name} \u2014 ${p.stock} in stock</option>`)
+  ).join('');
+
+  const draftRows = state.consignDraft.map(d => `
+    <div class="cons-item">
+      <div class="nm">${d.name}<div class="sub">${d.qty} pcs \u00D7 ${money(d.price)}</div></div>
+      <div class="mono">${money(d.price*d.qty)}</div>
+      <button class="icon-btn" data-draft-del="${d.product_id}" title="Remove">\u2715</button>
+    </div>`).join('') || `<div class="empty">No items added yet.</div>`;
+
+  const history = state.consignments.map(c => {
+    const items = c.consignment_items || [];
+    const dt = new Date(c.created_at);
+    const open = c.status !== 'closed';
+    const sent = items.reduce((s,i)=> s + (i.qty_sent||0), 0);
+    const sold = items.reduce((s,i)=> s + (i.qty_sold||0), 0);
+    const ret = items.reduce((s,i)=> s + (i.qty_returned||0), 0);
+    const soldValue = items.reduce((s,i)=> s + i.price*(i.qty_sold||0), 0);
+
+    const itemRows = items.map(i => {
+      if(open){
+        const st = state.settle[i.id] || {};
+        const remaining = (i.qty_sent||0) - (Number(st.sold)||0) - (Number(st.returned)||0);
+        return `
+        <div class="cons-item">
+          <div class="nm">${i.product_name}
+            <div class="sub">${i.qty_sent} sent @ ${money(i.price)} \u00B7 <span data-remain="${i.id}">${remaining}</span> not yet accounted</div>
+          </div>
+          <div>
+            <label>Sold</label>
+            <input class="num-sm" type="number" min="0" step="1" data-sold="${i.id}" value="${st.sold === undefined ? '' : st.sold}">
+          </div>
+          <div>
+            <label>Returned</label>
+            <input class="num-sm" type="number" min="0" step="1" data-ret="${i.id}" value="${st.returned === undefined ? '' : st.returned}">
+          </div>
+        </div>`;
+      }
+      const left = (i.qty_sent||0) - (i.qty_sold||0) - (i.qty_returned||0);
+      return `
+        <div class="cons-item">
+          <div class="nm">${i.product_name}
+            <div class="sub">${i.qty_sent} sent \u00B7 ${i.qty_sold||0} sold \u00B7 ${i.qty_returned||0} returned${left>0 ? ' \u00B7 ' + left + ' missing' : ''}</div>
+          </div>
+          <div class="mono">${money(i.price*(i.qty_sold||0))}</div>
+        </div>`;
+    }).join('');
+
+    return `
+    <div class="sale-row">
+      <div class="head">
+        <span>${c.consignee} <span class="tag ${open?'open':'closed'}">${open?'Out':'Settled'}</span></span>
+        <span class="amt mono">${money(soldValue)}</span>
+      </div>
+      <div class="items">${dt.toLocaleString()} \u00B7 ${sent} pcs sent${open ? '' : ' \u00B7 ' + sold + ' sold \u00B7 ' + ret + ' returned'}${c.note ? ' \u00B7 ' + c.note : ''}</div>
+      ${itemRows}
+      ${open ? `<button class="primary" data-settle="${c.id}" ${state.busy?'disabled':''}>${state.busy ? 'Saving...' : 'Record sold / returned'}</button>` : ''}
+    </div>`;
+  }).join('') || `<div class="empty">No consignments yet.</div>`;
+
+  return `
+  <div class="grid">
+    <div class="panel">
+      <h2>Send items out</h2>
+      <div class="field">
+        <label>Who receives it (person or branch)</label>
+        <input id="cs-consignee" placeholder="e.g. Ate Mhel / Branch 2" value="${state.consignee}">
+      </div>
+      <div class="field">
+        <label>Note (optional)</label>
+        <input id="cs-note" placeholder="e.g. bazaar sa Sabado" value="${state.consignNote}">
+      </div>
+      <div class="field">
+        <label>Product</label>
+        <select id="cs-product">${opts}</select>
+      </div>
+      <div class="row2">
+        <div class="field">
+          <label>Quantity</label>
+          <input id="cs-qty" type="number" min="1" step="1" placeholder="0" value="${state.consignPickQty}">
+        </div>
+        <div class="field">
+          <label>&nbsp;</label>
+          <button class="ghost" id="btn-cs-add" style="width:100%; padding:9px;">Add item</button>
+        </div>
+      </div>
+      <div style="border-top:1px solid var(--line); margin:6px 0 10px;"></div>
+      <div>${draftRows}</div>
+      <div class="cart-total">
+        <span>Value sent out</span>
+        <span class="amt mono">${money(consignDraftTotal())}</span>
+      </div>
+      <button class="primary" id="btn-cs-send" ${state.busy || state.consignDraft.length===0 ? 'disabled' : ''}>${state.busy ? 'Saving...' : 'Send consignment'}</button>
+      <div class="setup-note">Sent pieces are taken out of shop stock. Pag-return, ilagay lang kung ilan ang nabenta at ilan ang nagbalik \u2014 ang nabenta ay masasama sa sales, at ang nagbalik ay babalik sa stock.</div>
+    </div>
+    <div class="panel">
+      <h2>Consignment history</h2>
+      <div>${history}</div>
+    </div>
+  </div>`;
+}
+
 function render(){
   const app = document.getElementById('app');
   let body;
@@ -638,6 +1041,8 @@ function render(){
     body = renderSettings();
   } else if(state.tab === 'items'){
     body = renderSaleItems();
+  } else if(state.tab === 'consign'){
+    body = renderConsign();
   } else {
     body = renderHistory();
   }
@@ -654,6 +1059,7 @@ function render(){
         <button data-tab="products" class="${state.tab==='products'?'active':''}">Products</button>
         <button data-tab="history" class="${state.tab==='history'?'active':''}">History</button>
         <button data-tab="items" class="${state.tab==='items'?'active':''}">Sale Items</button>
+        <button data-tab="consign" class="${state.tab==='consign'?'active':''}">Consign</button>
         <button data-tab="settings" class="${state.tab==='settings'?'active':''}">Settings</button>
       </nav>` : ''}
     </header>
@@ -666,6 +1072,7 @@ function render(){
     b.addEventListener('click', ()=>{ state.tab = b.dataset.tab; render();
       if(state.tab==='history') fetchSales();
       if(state.tab==='items') fetchSaleItems();
+      if(state.tab==='consign') fetchConsignments();
     });
   });
 
@@ -721,6 +1128,79 @@ function render(){
 
   app.querySelectorAll('[data-del]').forEach(b=>{
     b.addEventListener('click', (ev)=>{ ev.stopPropagation(); deleteProduct(b.dataset.del); });
+  });
+
+  /* typed cart quantity */
+  app.querySelectorAll('[data-qty]').forEach(inp=>{
+    inp.addEventListener('input', ()=> setCartQty(inp.dataset.qty, inp.value));
+    inp.addEventListener('blur', ()=> commitCartQty(inp.dataset.qty));
+    inp.addEventListener('keydown', (ev)=>{ if(ev.key === 'Enter') inp.blur(); });
+  });
+
+  /* edit + restock */
+  app.querySelectorAll('[data-edit]').forEach(r=>{
+    r.addEventListener('click', (ev)=>{
+      if(ev.target.hasAttribute('data-del')) return;
+      const p = state.products.find(x=>x.id===r.dataset.edit);
+      if(p){ state.editing = { id: p.id, name: p.name, price: p.price }; state.restockQty = ''; render(); }
+    });
+  });
+  const saveProdBtn = document.getElementById('btn-save-product');
+  if(saveProdBtn){
+    saveProdBtn.addEventListener('click', ()=>{
+      updateProduct(state.editing.id, document.getElementById('ep-name').value.trim(), document.getElementById('ep-price').value);
+    });
+  }
+  const cancelEditBtn = document.getElementById('btn-cancel-edit');
+  if(cancelEditBtn) cancelEditBtn.addEventListener('click', ()=>{ state.editing = null; render(); });
+  const restockBtn = document.getElementById('btn-restock');
+  if(restockBtn){
+    restockBtn.addEventListener('click', ()=>{
+      restockProduct(state.editing.id, document.getElementById('rs-qty').value);
+    });
+  }
+
+  /* consignment */
+  const csConsignee = document.getElementById('cs-consignee');
+  if(csConsignee) csConsignee.addEventListener('input', ()=>{ state.consignee = csConsignee.value; });
+  const csNote = document.getElementById('cs-note');
+  if(csNote) csNote.addEventListener('input', ()=>{ state.consignNote = csNote.value; });
+  const csProduct = document.getElementById('cs-product');
+  if(csProduct) csProduct.addEventListener('change', ()=>{ state.consignPick = csProduct.value; });
+  const csQty = document.getElementById('cs-qty');
+  if(csQty) csQty.addEventListener('input', ()=>{ state.consignPickQty = csQty.value; });
+  const csAddBtn = document.getElementById('btn-cs-add');
+  if(csAddBtn) csAddBtn.addEventListener('click', addConsignDraft);
+  const csSendBtn = document.getElementById('btn-cs-send');
+  if(csSendBtn) csSendBtn.addEventListener('click', sendConsignment);
+  app.querySelectorAll('[data-draft-del]').forEach(b=>{
+    b.addEventListener('click', ()=>{
+      state.consignDraft = state.consignDraft.filter(d=>d.product_id !== b.dataset.draftDel);
+      render();
+    });
+  });
+
+  function bindSettleInput(inp, id, key){
+    inp.addEventListener('input', ()=>{
+      if(!state.settle[id]) state.settle[id] = {};
+      state.settle[id][key] = inp.value;
+      const item = state.consignments
+        .flatMap(c=> c.consignment_items || [])
+        .find(i=> i.id === id);
+      const span = document.querySelector(`[data-remain="${id}"]`);
+      if(item && span){
+        const s = state.settle[id];
+        span.textContent = (item.qty_sent||0) - (Number(s.sold)||0) - (Number(s.returned)||0);
+      }
+    });
+  }
+  app.querySelectorAll('[data-sold]').forEach(inp=> bindSettleInput(inp, inp.dataset.sold, 'sold'));
+  app.querySelectorAll('[data-ret]').forEach(inp=> bindSettleInput(inp, inp.dataset.ret, 'returned'));
+  app.querySelectorAll('[data-settle]').forEach(b=>{
+    b.addEventListener('click', ()=>{
+      const c = state.consignments.find(x=>x.id === b.dataset.settle);
+      if(c) settleConsignment(c);
+    });
   });
 }
 
