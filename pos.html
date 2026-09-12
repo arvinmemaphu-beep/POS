@@ -160,6 +160,7 @@ const state = {
   products: [],
   cart: [], // {id, name, price, qty}
   sales: [],
+  saleItems: [],
   loading: false,
   toast: null,
   tendered: '',
@@ -240,6 +241,19 @@ async function fetchSales(){
     state.sales = await res.json();
   }catch(e){
     showToast('Could not load sales: ' + e.message, true);
+  }
+  state.loading = false; render();
+}
+
+async function fetchSaleItems(){
+  if(!state.connected) return;
+  state.loading = true; render();
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/sale_items?select=*,sales(created_at)&order=created_at.desc&limit=500`, { headers: supaHeaders() });
+    if(!res.ok) throw new Error('Failed to load sale items');
+    state.saleItems = await res.json();
+  }catch(e){
+    showToast('Could not load sale items: ' + e.message, true);
   }
   state.loading = false; render();
 }
@@ -566,6 +580,51 @@ function renderHistory(){
   return `<div class="panel">${rows}</div>`;
 }
 
+function renderSaleItems(){
+  const byProduct = {};
+  for(const it of state.saleItems){
+    const key = it.product_name;
+    if(!byProduct[key]) byProduct[key] = { qty: 0, revenue: 0 };
+    byProduct[key].qty += it.qty;
+    byProduct[key].revenue += it.price * it.qty;
+  }
+  const summaryRows = Object.entries(byProduct)
+    .sort((a,b)=> b[1].revenue - a[1].revenue)
+    .map(([name, s]) => `
+      <div class="product-row">
+        <div>
+          <div class="name">${name}</div>
+          <div class="meta">${s.qty} sold</div>
+        </div>
+        <div class="price mono">${money(s.revenue)}</div>
+      </div>
+    `).join('') || `<div class="empty">No sale items yet.</div>`;
+
+  const listRows = state.saleItems.map(it => {
+    const d = it.sales && it.sales.created_at ? new Date(it.sales.created_at) : null;
+    return `
+    <div class="sale-row">
+      <div class="head">
+        <span>${d ? d.toLocaleString() : ''}</span>
+        <span class="amt mono">${money(it.price * it.qty)}</span>
+      </div>
+      <div class="items">${it.qty}\u00D7 ${it.product_name} @ ${money(it.price)}</div>
+    </div>`;
+  }).join('') || `<div class="empty">No sale items yet.</div>`;
+
+  return `
+  <div class="grid">
+    <div class="panel">
+      <h2>Total sold per product</h2>
+      <div class="product-list">${summaryRows}</div>
+    </div>
+    <div class="panel">
+      <h2>All sale items</h2>
+      <div>${listRows}</div>
+    </div>
+  </div>`;
+}
+
 function render(){
   const app = document.getElementById('app');
   let body;
@@ -577,6 +636,8 @@ function render(){
     body = renderProducts();
   } else if(state.tab === 'settings'){
     body = renderSettings();
+  } else if(state.tab === 'items'){
+    body = renderSaleItems();
   } else {
     body = renderHistory();
   }
@@ -592,6 +653,7 @@ function render(){
         <button data-tab="pos" class="${state.tab==='pos'?'active':''}">Sell</button>
         <button data-tab="products" class="${state.tab==='products'?'active':''}">Products</button>
         <button data-tab="history" class="${state.tab==='history'?'active':''}">History</button>
+        <button data-tab="items" class="${state.tab==='items'?'active':''}">Sale Items</button>
         <button data-tab="settings" class="${state.tab==='settings'?'active':''}">Settings</button>
       </nav>` : ''}
     </header>
@@ -603,6 +665,7 @@ function render(){
   app.querySelectorAll('nav.tabs button').forEach(b=>{
     b.addEventListener('click', ()=>{ state.tab = b.dataset.tab; render();
       if(state.tab==='history') fetchSales();
+      if(state.tab==='items') fetchSaleItems();
     });
   });
 
