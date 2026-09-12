@@ -294,10 +294,14 @@ function cartTotal(){
 async function checkout(){
   if(state.cart.length===0) return;
   if(state.checkingOut) return; // prevent double-submit from fast/repeated taps
+  const total = cartTotal();
+  const tenderedNum = Number(state.tendered) || 0;
+  if(state.tendered === '' || tenderedNum < total){
+    showToast('Enter a valid amount received (must cover the total).', true);
+    return;
+  }
   state.checkingOut = true;
   render();
-
-  const total = cartTotal();
   const items = state.cart.map(c=>({ id:c.id, name:c.name, price:c.price, qty:c.qty }));
   try{
     const res = await fetch(`${state.supaUrl}/rest/v1/sales`, {
@@ -399,6 +403,9 @@ function renderPOS(){
   const tenderedNum = Number(state.tendered) || 0;
   const change = tenderedNum - total;
   const hasCart = state.cart.length > 0;
+  const tenderedEntered = state.tendered !== '';
+  const insufficientAmount = hasCart && (!tenderedEntered || tenderedNum < total);
+  const canCheckout = hasCart && !state.checkingOut && !insufficientAmount;
 
   return `
   <div class="grid">
@@ -422,8 +429,9 @@ function renderPOS(){
         <span>Change (sukli)</span>
         <span class="amt mono" style="color:${change < 0 ? 'var(--red)' : 'var(--green)'};">${money(Math.max(change,0))}</span>
       </div>
+      ${insufficientAmount ? `<div style="color:var(--red); font-size:12.5px; margin-top:8px;">${!tenderedEntered ? 'Enter the amount received before completing the sale.' : 'Amount received is less than the total.'}</div>` : ''}
       ` : ''}
-      <button class="primary" id="btn-checkout" ${(!hasCart || state.checkingOut)?'disabled':''}>${state.checkingOut ? 'Saving...' : 'Complete sale'}</button>
+      <button class="primary" id="btn-checkout" ${!canCheckout?'disabled':''}>${state.checkingOut ? 'Saving...' : 'Complete sale'}</button>
     </div>
   </div>`;
 }
