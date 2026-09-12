@@ -177,7 +177,7 @@ function showToast(msg, isErr){
 }
 
 function money(n){
-  return 'â‚±' + Number(n).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+  return '\u20B1' + Number(n).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
 }
 
 async function loadConfig(){
@@ -357,7 +357,7 @@ alter table sales enable row level security;
 create policy "anon full access" on products for all using (true) with check (true);
 create policy "anon full access" on sales for all using (true) with check (true);</code>
       <br>
-      Get your URL and anon key from Project Settings â†’ API. The policies above allow open read/write with the anon key â€” fine for a personal or single-device POS, not for a public-facing app.
+      Get your URL and anon key from Project Settings &rarr; API. The policies above allow open read/write with the anon key &mdash; fine for a personal or single-device POS, not for a public-facing app.
     </div>
   </div>`;
 }
@@ -377,7 +377,7 @@ function renderPOS(){
     <div class="cart-row">
       <div class="name">${c.name}</div>
       <div class="qty-controls">
-        <button data-dec="${c.id}">âˆ’</button>
+        <button data-dec="${c.id}">\u2212</button>
         <span class="mono">${c.qty}</span>
         <button data-inc="${c.id}">+</button>
       </div>
@@ -412,7 +412,7 @@ function renderProducts(){
       </div>
       <div style="display:flex; align-items:center; gap:10px;">
         <div class="price mono">${money(p.price)}</div>
-        <button class="icon-btn" data-del="${p.id}" title="Delete">âœ•</button>
+        <button class="icon-btn" data-del="${p.id}" title="Delete">\u2715</button>
       </div>
     </div>
   `).join('') || `<div class="empty">No products yet.</div>`;
@@ -447,7 +447,7 @@ function renderProducts(){
 function renderHistory(){
   const rows = state.sales.map(s => {
     const d = new Date(s.created_at);
-    const itemsStr = (s.items||[]).map(i=>`${i.qty}Ã— ${i.name}`).join(', ');
+    const itemsStr = (s.items||[]).map(i=>`${i.qty}\u00D7 ${i.name}`).join(', ');
     return `
     <div class="sale-row">
       <div class="head">
