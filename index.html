@@ -4,6 +4,14 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>CCFACO POS</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#14261F">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="CCFACO POS">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <style>
   :root{
     --bg: #14261F;
@@ -77,6 +85,10 @@
   .product-row:hover{ background: var(--bg-panel-2); }
   .product-row .name{ font-size: 14.5px; }
   .product-row .meta{ font-size: 12px; color: var(--ink-dim); margin-top:2px; }
+  .stock-num{ font-size: 16px; font-weight: 700; color: var(--gold); }
+  .stock-num.stock-low{ color: var(--red); }
+  .stock-callout{ font-size: 20px; font-weight: 700; color: var(--gold); margin-top: 4px; }
+  .stock-callout.stock-low{ color: var(--red); }
   .product-row .price{ font-size: 15px; color: var(--gold); }
 
   .cart-row{
@@ -1258,7 +1270,7 @@ function renderPOS(){
     <div class="product-row" data-id="${p.id}">
       <div>
         <div class="name">${p.name}</div>
-        <div class="meta">${p.stock} in stock${discMeta}</div>
+        <div class="meta"><span class="stock-num${p.stock<=5?' stock-low':''}">${p.stock}</span> in stock${discMeta}</div>
       </div>
       <div class="price mono">${priceHtml}</div>
     </div>`;
@@ -1512,6 +1524,11 @@ function renderConsign(){
       <div class="field">
         <label>Product</label>
         <select id="cs-product">${opts}</select>
+        ${(() => {
+          const picked = state.products.find(x => x.id === state.consignPick);
+          if(!picked) return '';
+          return `<div id="cs-stock-callout" class="stock-callout${picked.stock<=5?' stock-low':''}">${picked.stock} in stock</div>`;
+        })()}
       </div>
       <div class="row2">
         <div class="field">
@@ -1759,7 +1776,7 @@ function render(){
   const csNote = document.getElementById('cs-note');
   if(csNote) csNote.addEventListener('input', ()=>{ state.consignNote = csNote.value; });
   const csProduct = document.getElementById('cs-product');
-  if(csProduct) csProduct.addEventListener('change', ()=>{ state.consignPick = csProduct.value; });
+  if(csProduct) csProduct.addEventListener('change', ()=>{ state.consignPick = csProduct.value; render(); });
   const csQty = document.getElementById('cs-qty');
   if(csQty) csQty.addEventListener('input', ()=>{ state.consignPickQty = csQty.value; });
   const csAddBtn = document.getElementById('btn-cs-add');
@@ -1804,6 +1821,12 @@ async function init(){
 }
 
 init();
+
+if('serviceWorker' in navigator){
+  window.addEventListener('load', ()=>{
+    navigator.serviceWorker.register('sw.js').catch(()=>{});
+  });
+}
 </script>
 </body>
 </html>
