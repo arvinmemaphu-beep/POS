@@ -207,6 +207,7 @@ const state = {
   editingMember: null,  // {id, full_name, phone, share_capital} member being edited
   memberSearch: '',
   discountCol: false,   // true once the products table has a discount column (see Settings SQL)
+  saleMemberId: '',      // id of the member picked for THIS sale in the Sell tab; '' = walk-in, no discount
 };
 
 function el(html){
@@ -312,7 +313,7 @@ async function restoreAuth(){
     await fetchCurrentUser();
     await loadProfile();
     const ok = await testConnection();
-    if(ok) await checkDiscountColumn();
+    if(ok){ await checkDiscountColumn(); await fetchMembers(); }
     return ok;
   }catch(e){
     clearSession();
@@ -346,6 +347,7 @@ async function login(email, password){
     await checkDiscountColumn();
     state.tab = 'pos';
     await fetchProducts();
+    await fetchMembers();
     welcome = 'Signed in as ' + roleLabel() + '.';
   }catch(e){
     clearSession();
@@ -374,6 +376,7 @@ function logout(){
   state.members = [];
   state.editingMember = null;
   state.memberSearch = '';
+  state.saleMemberId = '';
   render();
 }
 
@@ -530,9 +533,15 @@ function productDiscount(productId){
   return (isNaN(n) || n <= 0) ? 0 : Math.min(n, base);
 }
 
-// price per piece after the product's fixed discount
+// the member price for a product, regardless of whether a sale is in progress — used for informational display (Products tab)
+function memberPriceOf(p){
+  return Math.round((p.price - productDiscount(p.id)) * 100) / 100;
+}
+
+// price per piece actually charged in the cart — the discount only applies when a member is picked for this sale
 function discountedUnitPrice(c){
-  return Math.round((c.price - productDiscount(c.id)) * 100) / 100;
+  if(!state.saleMemberId) return c.price;
+  return memberPriceOf(c);
 }
 
 function lineTotal(c){
@@ -611,6 +620,7 @@ async function checkout(){
     }
     state.cart = [];
     state.tendered = '';
+    state.saleMemberId = '';
     await fetchProducts();
     showToast('Sale recorded — ' + money(total));
   }catch(e){
@@ -1186,8 +1196,9 @@ function renderLogin(){
 function renderSettings(){ return renderAdminSettings(); }
 
 function renderPOS(){
+  const memberActive = !!state.saleMemberId;
   const rows = state.products.map(p => {
-    const disc = state.discountCol ? productDiscount(p.id) : 0;
+    const disc = (state.discountCol && memberActive) ? productDiscount(p.id) : 0;
     const priceHtml = disc > 0
       ? '<span class="strike">' + money(p.price) + '</span> ' + money(discountedUnitPrice(p))
       : money(p.price);
@@ -1230,6 +1241,13 @@ function renderPOS(){
     </div>
     <div class="panel">
       <h2>Current sale</h2>
+      <div class="field">
+        <label>Buyer</label>
+        <select id="in-sale-member">
+          <option value="">Walk-in (no discount)</option>
+          ${state.members.map(m => `<option value="${m.id}" ${state.saleMemberId===m.id?'selected':''}>${escapeHtml(m.full_name)}</option>`).join('')}
+        </select>
+      </div>
       <div>${cartRows}</div>
       <div class="cart-total">
         <span>Total</span>
@@ -1259,7 +1277,7 @@ function productDiscountLabel(p){
 function renderProducts(){
   const rows = state.products.map(p =>     '<div class="product-row" data-edit="' + p.id + '" style="' + (isViewer() ? 'cursor:default;' : '') + '">' +
       '<div><div class="name">' + p.name + '</div><div class="meta">' + p.stock + ' in stock' + (state.discountCol ? productDiscountLabel(p) : '') + '</div></div>' +
-      '<div style="display:flex; align-items:center; gap:10px;"><div class="price mono">' + (state.discountCol && productDiscount(p.id) > 0 ? '<span class="strike">' + money(p.price) + '</span> ' + money(discountedUnitPrice(p)) : money(p.price)) + '</div>' +
+      '<div style="display:flex; align-items:center; gap:10px;"><div class="price mono">' + (state.discountCol && productDiscount(p.id) > 0 ? '<span class="strike">' + money(p.price) + '</span> ' + money(memberPriceOf(p)) : money(p.price)) + '</div>' +
       (isViewer() ? '' : '<button class="icon-btn" data-del="' + p.id + '" title="Delete">\u2715</button>') + '</div></div>'
   ).join('') || '<div class="empty">No products yet.</div>';
 
@@ -1575,6 +1593,14 @@ function render(){
 
   const checkoutBtn = document.getElementById('btn-checkout');
   if(checkoutBtn) checkoutBtn.addEventListener('click', checkout);
+
+  const saleMemberSelect = document.getElementById('in-sale-member');
+  if(saleMemberSelect){
+    saleMemberSelect.addEventListener('change', ()=>{
+      state.saleMemberId = saleMemberSelect.value;
+      render();
+    });
+  }
 
   const tenderedInput = document.getElementById('in-tendered');
   if(tenderedInput){
