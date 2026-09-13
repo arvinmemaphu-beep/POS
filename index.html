@@ -170,11 +170,13 @@
 <body>
 <div class="app" id="app"></div>
 
+<script src="config.js"></script>
 <script>
+const supabaseConfig = window.SUPABASE_CONFIG || {};
 const state = {
   tab: 'pos',
-  supaUrl: '',
-  supaKey: '',
+  supaUrl: supabaseConfig.url || '',
+  supaKey: supabaseConfig.anonKey || '',
   session: null,
   user: null,
   role: null,
@@ -220,11 +222,17 @@ function money(n){
 
 async function loadConfig(){
   try{
-    const raw = localStorage.getItem('supabase-config');
-    if(raw){
-      const cfg = JSON.parse(raw);
-      state.supaUrl = cfg.url || '';
-      state.supaKey = cfg.key || '';
+    const external = window.SUPABASE_CONFIG || {};
+    if(external.url && external.anonKey){
+      state.supaUrl = external.url;
+      state.supaKey = external.anonKey;
+    } else {
+      const raw = localStorage.getItem('supabase-config');
+      if(raw){
+        const cfg = JSON.parse(raw);
+        state.supaUrl = cfg.url || '';
+        state.supaKey = cfg.key || '';
+      }
     }
     const savedSession = sessionStorage.getItem('supa-session');
     if(savedSession) state.session = JSON.parse(savedSession);
@@ -979,7 +987,6 @@ function renderLogin(){
     '<div class="field"><label>Password</label><input id="in-password" type="password" autocomplete="current-password" placeholder="Your password"></div>' +
     '<button class="primary" id="btn-login">' + (state.authLoading ? 'Signing in...' : 'Sign in') + '</button>' +
     (state.authError ? '<div class="auth-error">' + escapeHtml(state.authError) + '</div>' : '') +
-    '<button class="ghost" id="btn-change-config" style="width:100%; margin-top:10px;">Change Supabase connection</button>' +
   '</div></div>';
 }
 
@@ -1345,22 +1352,6 @@ function render(){
 
   const logoutBtn = document.getElementById('btn-logout');
   if(logoutBtn) logoutBtn.addEventListener('click', logout);
-
-  const changeConfigBtn = document.getElementById('btn-change-config');
-  if(changeConfigBtn){
-    changeConfigBtn.addEventListener('click', ()=>{
-      clearSession();
-      localStorage.removeItem('supabase-config');
-      state.supaUrl = '';
-      state.supaKey = '';
-      state.session = null;
-      state.user = null;
-      state.role = null;
-      state.connected = false;
-      state.authError = '';
-      render();
-    });
-  }
 
   app.querySelectorAll('.product-row[data-id]').forEach(r=>{
     r.addEventListener('click', ()=>{
