@@ -1,0 +1,1229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CCFACO POS</title>
+<style>
+  :root{
+    --bg: #14261F;
+    --bg-panel: #1B3129;
+    --bg-panel-2: #21382F;
+    --ink: #F3EFE3;
+    --ink-dim: #B9C7BE;
+    --line: #33473D;
+    --gold: #D9B65B;
+    --gold-dim: #A88A3F;
+    --red: #C1584A;
+    --green: #6FA383;
+    --radius: 3px;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--bg);
+    color:var(--ink);
+    font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    min-height:100vh;
+  }
+  .serif{ font-family: "Source Serif 4", Georgia, "Times New Roman", serif; }
+  .mono{ font-variant-numeric: tabular-nums; font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; }
+
+  .app{ max-width: 1100px; margin: 0 auto; padding: 20px 16px 60px; }
+
+  header.top{
+    display:flex; align-items:baseline; justify-content:space-between;
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 14px; margin-bottom: 18px;
+    flex-wrap: wrap; gap: 10px;
+  }
+  header.top h1{
+    font-size: 26px; font-weight: 600; margin:0; letter-spacing: 0.2px;
+  }
+  header.top .sub{ color: var(--ink-dim); font-size: 13px; margin-top: 4px; }
+
+  nav.tabs{ display:flex; gap: 4px; }
+  nav.tabs button{
+    background:none; border:none; color: var(--ink-dim);
+    font-size: 14px; padding: 8px 14px; cursor:pointer;
+    border-bottom: 2px solid transparent;
+  }
+  nav.tabs button.active{ color: var(--gold); border-bottom-color: var(--gold); }
+  nav.tabs button:hover{ color: var(--ink); }
+
+  .status-dot{ display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:6px; }
+  .status-ok{ background: var(--green); }
+  .status-bad{ background: var(--red); }
+  .status-row{ font-size:12px; color: var(--ink-dim); display:flex; align-items:center; margin-top:4px; }
+
+  .grid{ display:grid; grid-template-columns: 1.5fr 1fr; gap: 20px; }
+  @media (max-width: 800px){ .grid{ grid-template-columns: 1fr; } }
+
+  .panel{
+    background: var(--bg-panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 16px;
+  }
+  .panel h2{ font-size: 15px; margin: 0 0 12px; color: var(--ink-dim); font-weight: 600; }
+
+  .product-list{ display:flex; flex-direction:column; gap:1px; }
+  .product-row{
+    display:flex; justify-content:space-between; align-items:center;
+    padding: 11px 4px; border-bottom: 1px solid var(--line);
+    cursor:pointer;
+  }
+  .product-row:last-child{ border-bottom:none; }
+  .product-row:hover{ background: var(--bg-panel-2); }
+  .product-row .name{ font-size: 14.5px; }
+  .product-row .meta{ font-size: 12px; color: var(--ink-dim); margin-top:2px; }
+  .product-row .price{ font-size: 15px; color: var(--gold); }
+
+  .cart-row{
+    display:flex; justify-content:space-between; align-items:center;
+    padding: 9px 0; border-bottom: 1px solid var(--line); gap:8px;
+  }
+  .cart-row .name{ font-size:14px; flex:1; }
+  .qty-controls{ display:flex; align-items:center; gap:6px; }
+  .qty-controls button{
+    width:22px; height:22px; border-radius:50%; border:1px solid var(--line);
+    background:var(--bg-panel-2); color:var(--ink); cursor:pointer; font-size:13px; line-height:1;
+  }
+  .cart-total{
+    display:flex; justify-content:space-between; align-items:baseline;
+    padding-top: 14px; margin-top: 6px; border-top: 1px solid var(--gold-dim);
+  }
+  .cart-total .amt{ font-size: 24px; color: var(--gold); }
+
+  button.primary{
+    width:100%; margin-top:14px; padding: 11px; border:none; border-radius: var(--radius);
+    background: var(--gold); color: #1B2A20; font-weight:600; font-size:14px; cursor:pointer;
+  }
+  button.primary:disabled{ opacity:0.4; cursor:not-allowed; }
+  button.primary:hover:not(:disabled){ background:#E5C36B; }
+
+  button.ghost{
+    background:none; border:1px solid var(--line); color: var(--ink-dim);
+    padding:7px 12px; border-radius: var(--radius); cursor:pointer; font-size:13px;
+  }
+  button.ghost:hover{ color: var(--ink); border-color: var(--ink-dim); }
+
+  input, .field-input{
+    width:100%; background: var(--bg); border:1px solid var(--line); color: var(--ink);
+    padding: 9px 10px; border-radius: var(--radius); font-size: 14px; font-family: inherit;
+  }
+  input:focus{ outline:none; border-color: var(--gold-dim); }
+  label{ font-size:12px; color: var(--ink-dim); display:block; margin-bottom:4px; }
+  .field{ margin-bottom:12px; }
+  .row2{ display:flex; gap:10px; }
+  .row2 .field{ flex:1; }
+
+  .empty{ color: var(--ink-dim); font-size:13px; padding: 20px 4px; text-align:center; }
+
+  .sale-row{
+    padding: 12px 4px; border-bottom: 1px solid var(--line);
+  }
+  .sale-row .head{ display:flex; justify-content:space-between; font-size:14px; }
+  .sale-row .items{ color: var(--ink-dim); font-size:12.5px; margin-top:4px; }
+  .sale-row .amt{ color: var(--gold); }
+
+  .toast{
+    position: fixed; bottom: 20px; left:50%; transform: translateX(-50%);
+    background: var(--bg-panel-2); border:1px solid var(--line); color: var(--ink);
+    padding: 10px 18px; border-radius: var(--radius); font-size: 13px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+  }
+  .toast.err{ border-color: var(--red); color: #F0B3AB; }
+
+  .setup-note{
+    font-size: 12.5px; color: var(--ink-dim); line-height:1.6; margin-top: 10px;
+  }
+  .setup-note code{
+    background: var(--bg); padding: 1px 5px; border-radius: 2px; color: var(--gold);
+  }
+  a{ color: var(--gold); }
+
+  .del-x{ color: var(--red); cursor:pointer; font-size:12px; margin-left:8px; }
+  .icon-btn{ background:none; border:none; color:var(--ink-dim); cursor:pointer; font-size:16px; padding:2px 6px; }
+  .icon-btn:hover{ color: var(--red); }
+
+  .qty-input{ width:56px; text-align:center; padding:5px 4px; font-size:13px; }
+  .num-sm{ width:70px; padding:5px 6px; font-size:13px; text-align:center; }
+  .tag{ display:inline-block; font-size:11px; padding:2px 8px; border-radius:10px; border:1px solid var(--line); color:var(--ink-dim); }
+  .tag.open{ border-color: var(--gold-dim); color: var(--gold); }
+  .tag.closed{ border-color: var(--green); color: var(--green); }
+  .cons-item{ display:flex; flex-wrap:wrap; align-items:flex-end; gap:10px; padding:9px 0; border-bottom:1px solid var(--line); font-size:13px; }
+  .cons-item:last-child{ border-bottom:none; }
+  .cons-item .nm{ flex:1; min-width:130px; }
+  .cons-item .sub{ color:var(--ink-dim); font-size:11.5px; margin-top:2px; }
+  select{ width:100%; background:var(--bg); border:1px solid var(--line); color:var(--ink);
+    padding:9px 10px; border-radius:var(--radius); font-size:14px; font-family:inherit; }
+  select:focus{ outline:none; border-color: var(--gold-dim); }
+</style>
+</head>
+<body>
+<div class="app" id="app"></div>
+
+<script>
+const state = {
+  tab: 'pos',
+  supaUrl: '',
+  supaKey: '',
+  connected: false,
+  products: [],
+  cart: [], // {id, name, price, qty}
+  sales: [],
+  saleItems: [],
+  loading: false,
+  toast: null,
+  tendered: '',
+  checkingOut: false,
+  editing: null,        // {id, name, price} product being edited
+  restockQty: '',
+  consignments: [],
+  consignDraft: [],     // {product_id, name, price, qty}
+  consignee: '',
+  consignNote: '',
+  consignPick: '',
+  consignPickQty: '',
+  settle: {},           // item_id -> {sold, returned}
+  busy: false,
+};
+
+function el(html){
+  const t = document.createElement('template');
+  t.innerHTML = html.trim();
+  return t.content.firstChild;
+}
+
+function showToast(msg, isErr){
+  state.toast = {msg, isErr};
+  render();
+  setTimeout(()=>{ state.toast = null; render(); }, 3200);
+}
+
+function money(n){
+  return '\u20B1' + Number(n).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+}
+
+async function loadConfig(){
+  try{
+    const raw = localStorage.getItem('supabase-config');
+    if(raw){
+      const cfg = JSON.parse(raw);
+      state.supaUrl = cfg.url || '';
+      state.supaKey = cfg.key || '';
+    }
+  }catch(e){ /* no config yet */ }
+}
+
+async function saveConfig(){
+  try{
+    localStorage.setItem('supabase-config', JSON.stringify({url: state.supaUrl, key: state.supaKey}));
+  }catch(e){ /* storage unavailable, config just won't persist */ }
+}
+
+function supaHeaders(){
+  return {
+    'apikey': state.supaKey,
+    'Authorization': 'Bearer ' + state.supaKey,
+    'Content-Type': 'application/json',
+    'Prefer': 'return=representation'
+  };
+}
+
+async function testConnection(){
+  if(!state.supaUrl || !state.supaKey){ state.connected = false; return; }
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/products?select=id&limit=1`, { headers: supaHeaders() });
+    state.connected = res.ok;
+  }catch(e){
+    state.connected = false;
+  }
+}
+
+async function fetchProducts(){
+  if(!state.connected) return;
+  state.loading = true; render();
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/products?select=*&order=name.asc`, { headers: supaHeaders() });
+    if(!res.ok) throw new Error('Failed to load products');
+    state.products = await res.json();
+  }catch(e){
+    showToast('Could not load products: ' + e.message, true);
+  }
+  state.loading = false; render();
+}
+
+async function fetchSales(){
+  if(!state.connected) return;
+  state.loading = true; render();
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/sales?select=*,sale_items(product_name,price,qty)&order=created_at.desc&limit=50`, { headers: supaHeaders() });
+    if(!res.ok) throw new Error('Failed to load sales');
+    state.sales = await res.json();
+  }catch(e){
+    showToast('Could not load sales: ' + e.message, true);
+  }
+  state.loading = false; render();
+}
+
+async function fetchSaleItems(){
+  if(!state.connected) return;
+  state.loading = true; render();
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/sale_items?select=*,sales(created_at)&order=created_at.desc&limit=500`, { headers: supaHeaders() });
+    if(!res.ok) throw new Error('Failed to load sale items');
+    state.saleItems = await res.json();
+  }catch(e){
+    showToast('Could not load sale items: ' + e.message, true);
+  }
+  state.loading = false; render();
+}
+
+async function addProduct(name, price, stock){
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/products`, {
+      method:'POST', headers: supaHeaders(),
+      body: JSON.stringify([{ name, price: Number(price), stock: Number(stock) }])
+    });
+    if(!res.ok) throw new Error('Insert failed');
+    await fetchProducts();
+    showToast('Product added.');
+  }catch(e){
+    showToast('Could not add product: ' + e.message, true);
+  }
+}
+
+async function deleteProduct(id){
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/products?id=eq.${id}`, {
+      method:'DELETE', headers: supaHeaders()
+    });
+    if(!res.ok) throw new Error('Delete failed');
+    state.products = state.products.filter(p=>p.id!==id);
+    render();
+  }catch(e){
+    showToast('Could not delete product: ' + e.message, true);
+  }
+}
+
+function addToCart(product){
+  const existing = state.cart.find(c=>c.id===product.id);
+  if(existing){ existing.qty += 1; }
+  else{ state.cart.push({ id: product.id, name: product.name, price: product.price, qty: 1 }); }
+  render();
+}
+
+function changeQty(id, delta){
+  const item = state.cart.find(c=>c.id===id);
+  if(!item) return;
+  item.qty = (Number(item.qty)||0) + delta;
+  if(item.qty <= 0){ state.cart = state.cart.filter(c=>c.id!==id); }
+  if(state.cart.length === 0){ state.tendered = ''; }
+  render();
+}
+
+// Typed quantity: update numbers live without re-rendering (keeps focus in the input)
+function setCartQty(id, raw){
+  const item = state.cart.find(c=>c.id===id);
+  if(!item) return;
+  const n = Math.floor(Number(raw));
+  item.qty = (raw === '' || isNaN(n) || n < 0) ? 0 : n;
+  updateCartDisplay();
+}
+
+function commitCartQty(id){
+  const item = state.cart.find(c=>c.id===id);
+  if(!item) return;
+  if(!item.qty || item.qty <= 0){ state.cart = state.cart.filter(c=>c.id!==id); }
+  if(state.cart.length === 0){ state.tendered = ''; }
+  render();
+}
+
+function updateCartDisplay(){
+  for(const c of state.cart){
+    const lineEl = document.querySelector(`[data-line="${c.id}"]`);
+    if(lineEl) lineEl.textContent = money(c.price * (Number(c.qty)||0));
+  }
+  const totalEl = document.getElementById('cart-total-amt');
+  if(totalEl) totalEl.textContent = money(cartTotal());
+  updateChangeDisplay();
+}
+
+function cartTotal(){
+  return state.cart.reduce((sum,c)=> sum + c.price*c.qty, 0);
+}
+
+function updateChangeDisplay(){
+  const total = cartTotal();
+  const tenderedNum = Number(state.tendered) || 0;
+  const change = tenderedNum - total;
+  const tenderedEntered = state.tendered !== '';
+  const insufficientAmount = !tenderedEntered || tenderedNum < total;
+
+  const changeEl = document.getElementById('change-amount');
+  if(changeEl){
+    changeEl.textContent = money(Math.max(change,0));
+    changeEl.style.color = change < 0 ? 'var(--red)' : 'var(--green)';
+  }
+  const msgEl = document.getElementById('insufficient-msg');
+  if(msgEl){
+    msgEl.textContent = insufficientAmount ? (!tenderedEntered ? 'Enter the amount received before completing the sale.' : 'Amount received is less than the total.') : '';
+  }
+  const btn = document.getElementById('btn-checkout');
+  if(btn){
+    btn.disabled = insufficientAmount || state.checkingOut || state.cart.length===0;
+  }
+}
+
+async function checkout(){
+  if(state.cart.length===0) return;
+  if(state.checkingOut) return; // prevent double-submit from fast/repeated taps
+  const total = cartTotal();
+  const tenderedNum = Number(state.tendered) || 0;
+  if(state.tendered === '' || tenderedNum < total){
+    showToast('Enter a valid amount received (must cover the total).', true);
+    return;
+  }
+  state.checkingOut = true;
+  render();
+  try{
+    const saleRes = await fetch(`${state.supaUrl}/rest/v1/sales`, {
+      method:'POST', headers: supaHeaders(),
+      body: JSON.stringify([{ total }])
+    });
+    if(!saleRes.ok) throw new Error('Checkout failed');
+    const saleRows = await saleRes.json();
+    const saleId = saleRows[0].id;
+
+    const itemRows = state.cart.map(c => ({
+      sale_id: saleId,
+      product_id: c.id,
+      product_name: c.name,
+      price: c.price,
+      qty: c.qty
+    }));
+    const itemsRes = await fetch(`${state.supaUrl}/rest/v1/sale_items`, {
+      method:'POST', headers: supaHeaders(),
+      body: JSON.stringify(itemRows)
+    });
+    if(!itemsRes.ok) throw new Error('Failed to record sale items');
+
+    for(const c of state.cart){
+      const prod = state.products.find(p=>p.id===c.id);
+      if(prod){
+        const newStock = Math.max(0, (prod.stock||0) - c.qty);
+        await fetch(`${state.supaUrl}/rest/v1/products?id=eq.${c.id}`, {
+          method:'PATCH', headers: supaHeaders(),
+          body: JSON.stringify({ stock: newStock })
+        });
+      }
+    }
+    state.cart = [];
+    state.tendered = '';
+    await fetchProducts();
+    showToast('Sale recorded — ' + money(total));
+  }catch(e){
+    showToast('Checkout failed: ' + e.message, true);
+  }
+  state.checkingOut = false;
+  render();
+}
+
+/* ---------- Edit product / Restock ---------- */
+
+async function updateProduct(id, name, price){
+  if(!name){ showToast('Enter a product name.', true); return; }
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/products?id=eq.${id}`, {
+      method:'PATCH', headers: supaHeaders(),
+      body: JSON.stringify({ name, price: Number(price) })
+    });
+    if(!res.ok) throw new Error('Update failed');
+    state.editing = null;
+    await fetchProducts();
+    showToast('Product updated.');
+  }catch(e){
+    showToast('Could not update product: ' + e.message, true);
+  }
+}
+
+async function restockProduct(id, addQty){
+  const prod = state.products.find(p=>p.id===id);
+  if(!prod) return;
+  const add = Math.floor(Number(addQty));
+  if(!add || add <= 0){ showToast('Enter how many pieces to add.', true); return; }
+  try{
+    const newStock = (prod.stock||0) + add;
+    const res = await fetch(`${state.supaUrl}/rest/v1/products?id=eq.${id}`, {
+      method:'PATCH', headers: supaHeaders(),
+      body: JSON.stringify({ stock: newStock })
+    });
+    if(!res.ok) throw new Error('Restock failed');
+    state.restockQty = '';
+    await fetchProducts();
+    showToast('+' + add + ' ' + prod.name + ' \u2014 ' + newStock + ' in stock now.');
+  }catch(e){
+    showToast('Could not restock: ' + e.message, true);
+  }
+}
+
+async function setStock(id, newStock){
+  const res = await fetch(`${state.supaUrl}/rest/v1/products?id=eq.${id}`, {
+    method:'PATCH', headers: supaHeaders(),
+    body: JSON.stringify({ stock: Math.max(0, Math.floor(newStock)) })
+  });
+  if(!res.ok) throw new Error('Could not update stock');
+}
+
+/* ---------- Consignment ---------- */
+
+async function fetchConsignments(){
+  if(!state.connected) return;
+  state.loading = true; render();
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/consignments?select=*,consignment_items(*)&order=created_at.desc&limit=50`, { headers: supaHeaders() });
+    if(!res.ok) throw new Error('Failed to load consignments');
+    state.consignments = await res.json();
+  }catch(e){
+    showToast('Could not load consignments: ' + e.message, true);
+  }
+  state.loading = false; render();
+}
+
+function addConsignDraft(){
+  const p = state.products.find(x=>x.id===state.consignPick);
+  const qty = Math.floor(Number(state.consignPickQty));
+  if(!p){ showToast('Pick a product first.', true); return; }
+  if(!qty || qty <= 0){ showToast('Enter how many pieces to send.', true); return; }
+  const already = state.consignDraft.filter(d=>d.product_id===p.id).reduce((s,d)=>s+d.qty,0);
+  if(qty + already > (p.stock||0)){ showToast('Only ' + (p.stock||0) + ' in stock for ' + p.name + '.', true); return; }
+  const existing = state.consignDraft.find(d=>d.product_id===p.id);
+  if(existing){ existing.qty += qty; }
+  else{ state.consignDraft.push({ product_id: p.id, name: p.name, price: p.price, qty }); }
+  state.consignPickQty = '';
+  render();
+}
+
+function consignDraftTotal(){
+  return state.consignDraft.reduce((s,d)=> s + d.price*d.qty, 0);
+}
+
+async function sendConsignment(){
+  if(state.busy) return;
+  const consignee = state.consignee.trim();
+  if(!consignee){ showToast('Enter who receives the items.', true); return; }
+  if(state.consignDraft.length === 0){ showToast('Add at least one item.', true); return; }
+  state.busy = true; render();
+  try{
+    const cRes = await fetch(`${state.supaUrl}/rest/v1/consignments`, {
+      method:'POST', headers: supaHeaders(),
+      body: JSON.stringify([{ consignee, note: state.consignNote.trim() || null, status: 'open' }])
+    });
+    if(!cRes.ok) throw new Error('Could not create consignment');
+    const consignmentId = (await cRes.json())[0].id;
+
+    const itemRows = state.consignDraft.map(d => ({
+      consignment_id: consignmentId,
+      product_id: d.product_id,
+      product_name: d.name,
+      price: d.price,
+      qty_sent: d.qty,
+      qty_sold: 0,
+      qty_returned: 0
+    }));
+    const iRes = await fetch(`${state.supaUrl}/rest/v1/consignment_items`, {
+      method:'POST', headers: supaHeaders(), body: JSON.stringify(itemRows)
+    });
+    if(!iRes.ok) throw new Error('Could not save consignment items');
+
+    // items leave the shop, so take them out of stock
+    for(const d of state.consignDraft){
+      const prod = state.products.find(p=>p.id===d.product_id);
+      if(prod) await setStock(d.product_id, (prod.stock||0) - d.qty);
+    }
+
+    state.consignDraft = [];
+    state.consignee = '';
+    state.consignNote = '';
+    await fetchProducts();
+    await fetchConsignments();
+    showToast('Consignment sent to ' + consignee + '.');
+  }catch(e){
+    showToast('Could not send consignment: ' + e.message, true);
+  }
+  state.busy = false; render();
+}
+
+async function settleConsignment(consignment){
+  if(state.busy) return;
+  const items = consignment.consignment_items || [];
+  const rows = [];
+  for(const it of items){
+    const s = state.settle[it.id] || {};
+    const soldRaw = String(s.sold === undefined || s.sold === null ? '' : s.sold).trim();
+    const retRaw = String(s.returned === undefined || s.returned === null ? '' : s.returned).trim();
+    if(soldRaw === '' || retRaw === ''){
+      showToast('Enter sold and returned quantities for ' + it.product_name + '.', true);
+      return;
+    }
+    const sold = Math.floor(Number(soldRaw));
+    const ret = Math.floor(Number(retRaw));
+    if(isNaN(sold) || isNaN(ret)){
+      showToast('Invalid quantity for ' + it.product_name + '.', true);
+      return;
+    }
+    if(sold < 0 || ret < 0){ showToast('Quantities cannot be negative.', true); return; }
+    if(sold + ret > it.qty_sent){
+      showToast(it.product_name + ': sold + returned cannot be more than ' + it.qty_sent + ' sent.', true);
+      return;
+    }
+    rows.push({ it, sold, ret });
+  }
+  const soldTotal = rows.reduce((s,r)=> s + r.it.price*r.sold, 0);
+  state.busy = true; render();
+  try{
+    // record the sold pieces as a real sale so revenue reports stay correct
+    if(soldTotal > 0){
+      const saleRes = await fetch(`${state.supaUrl}/rest/v1/sales`, {
+        method:'POST', headers: supaHeaders(), body: JSON.stringify([{ total: soldTotal }])
+      });
+      if(!saleRes.ok) throw new Error('Could not record the sale');
+      const saleId = (await saleRes.json())[0].id;
+      const saleItems = rows.filter(r=>r.sold>0).map(r=>({
+        sale_id: saleId, product_id: r.it.product_id, product_name: r.it.product_name,
+        price: r.it.price, qty: r.sold
+      }));
+      const siRes = await fetch(`${state.supaUrl}/rest/v1/sale_items`, {
+        method:'POST', headers: supaHeaders(), body: JSON.stringify(saleItems)
+      });
+      if(!siRes.ok) throw new Error('Could not record sale items');
+    }
+
+    for(const r of rows){
+      const pRes = await fetch(`${state.supaUrl}/rest/v1/consignment_items?id=eq.${r.it.id}`, {
+        method:'PATCH', headers: supaHeaders(),
+        body: JSON.stringify({ qty_sold: r.sold, qty_returned: r.ret })
+      });
+      if(!pRes.ok) throw new Error('Could not update the tally');
+      // returned pieces go back to shop stock
+      if(r.ret > 0){
+        const prod = state.products.find(p=>p.id===r.it.product_id);
+        if(prod) await setStock(r.it.product_id, (prod.stock||0) + r.ret);
+      }
+    }
+
+    const cRes = await fetch(`${state.supaUrl}/rest/v1/consignments?id=eq.${consignment.id}`, {
+      method:'PATCH', headers: supaHeaders(),
+      body: JSON.stringify({ status: 'closed', settled_at: new Date().toISOString() })
+    });
+    if(!cRes.ok) throw new Error('Could not close the consignment');
+
+    state.settle = {};
+    await fetchProducts();
+    await fetchConsignments();
+    showToast('Consignment settled \u2014 sold ' + money(soldTotal) + '.');
+  }catch(e){
+    showToast('Could not settle: ' + e.message, true);
+  }
+  state.busy = false; render();
+}
+
+function renderSettings(){
+  return `
+  <div class="panel" style="max-width:520px;">
+    <h2>Connect to Supabase</h2>
+    <div class="field">
+      <label>Project URL</label>
+      <input id="in-url" placeholder="https://xxxx.supabase.co" value="${state.supaUrl}">
+    </div>
+    <div class="field">
+      <label>Anon public key</label>
+      <input id="in-key" placeholder="eyJhbGciOi..." value="${state.supaKey}">
+    </div>
+    <button class="primary" id="btn-connect" style="width:auto; padding:9px 18px;">Connect</button>
+    <div class="status-row">
+      <span class="status-dot ${state.connected?'status-ok':'status-bad'}"></span>
+      ${state.connected ? 'Connected' : 'Not connected'}
+    </div>
+    <div class="setup-note">
+      Run this once in your Supabase project's SQL editor to create the tables:
+      <br><br>
+      <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:6px;">create table products (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  price numeric not null default 0,
+  stock integer not null default 0,
+  created_at timestamptz default now()
+);
+
+create table sales (
+  id uuid primary key default gen_random_uuid(),
+  total numeric not null,
+  created_at timestamptz default now()
+);
+
+create table sale_items (
+  id uuid primary key default gen_random_uuid(),
+  sale_id uuid references sales(id) on delete cascade,
+  product_id uuid references products(id),
+  product_name text not null,
+  price numeric not null,
+  qty integer not null,
+  created_at timestamptz default now()
+);
+
+alter table products enable row level security;
+alter table sales enable row level security;
+alter table sale_items enable row level security;
+create policy "anon full access" on products for all using (true) with check (true);
+create policy "anon full access" on sales for all using (true) with check (true);
+create policy "anon full access" on sale_items for all using (true) with check (true);</code>
+      <br>
+      <strong>Consignment tables</strong> &mdash; run this too so the Consign tab works:
+      <br><br>
+      <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:6px;">create table consignments (
+  id uuid primary key default gen_random_uuid(),
+  consignee text not null,
+  note text,
+  status text not null default 'open',
+  settled_at timestamptz,
+  created_at timestamptz default now()
+);
+
+create table consignment_items (
+  id uuid primary key default gen_random_uuid(),
+  consignment_id uuid references consignments(id) on delete cascade,
+  product_id uuid references products(id),
+  product_name text not null,
+  price numeric not null,
+  qty_sent integer not null,
+  qty_sold integer not null default 0,
+  qty_returned integer not null default 0,
+  created_at timestamptz default now()
+);
+
+alter table consignments enable row level security;
+alter table consignment_items enable row level security;
+create policy "anon full access" on consignments for all using (true) with check (true);
+create policy "anon full access" on consignment_items for all using (true) with check (true);</code>
+      <br>
+      Get your URL and anon key from Project Settings &rarr; API. The policies above allow open read/write with the anon key &mdash; fine for a personal or single-device POS, not for a public-facing app.
+      <br><br>
+      <strong>Already have the old tables?</strong> Sales are now split into <code>sales</code> (per transaction) and <code>sale_items</code> (one row per product sold) for easier reporting. Run this in the SQL editor to switch over &mdash; note this clears existing sales history:
+      <br><br>
+      <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:6px;">drop table if exists sales cascade;
+
+create table sales (
+  id uuid primary key default gen_random_uuid(),
+  total numeric not null,
+  created_at timestamptz default now()
+);
+
+create table sale_items (
+  id uuid primary key default gen_random_uuid(),
+  sale_id uuid references sales(id) on delete cascade,
+  product_id uuid references products(id),
+  product_name text not null,
+  price numeric not null,
+  qty integer not null,
+  created_at timestamptz default now()
+);
+
+alter table sales enable row level security;
+alter table sale_items enable row level security;
+create policy "anon full access" on sales for all using (true) with check (true);
+create policy "anon full access" on sale_items for all using (true) with check (true);</code>
+    </div>
+  </div>`;
+}
+
+function renderPOS(){
+  const rows = state.products.map(p => `
+    <div class="product-row" data-id="${p.id}">
+      <div>
+        <div class="name">${p.name}</div>
+        <div class="meta">${p.stock} in stock</div>
+      </div>
+      <div class="price mono">${money(p.price)}</div>
+    </div>
+  `).join('') || `<div class="empty">No products yet. Add some in the Products tab.</div>`;
+
+  const cartRows = state.cart.map(c => `
+    <div class="cart-row">
+      <div class="name">${c.name}</div>
+      <div class="qty-controls">
+        <button data-dec="${c.id}">\u2212</button>
+        <input class="qty-input mono" data-qty="${c.id}" type="number" min="0" step="1" inputmode="numeric" value="${c.qty}">
+        <button data-inc="${c.id}">+</button>
+      </div>
+      <div class="mono" data-line="${c.id}" style="width:70px; text-align:right;">${money(c.price*(Number(c.qty)||0))}</div>
+    </div>
+  `).join('') || `<div class="empty">Cart is empty. Tap a product to add it.</div>`;
+
+  const total = cartTotal();
+  const tenderedNum = Number(state.tendered) || 0;
+  const change = tenderedNum - total;
+  const hasCart = state.cart.length > 0;
+  const tenderedEntered = state.tendered !== '';
+  const insufficientAmount = hasCart && (!tenderedEntered || tenderedNum < total);
+  const canCheckout = hasCart && !state.checkingOut && !insufficientAmount;
+
+  return `
+  <div class="grid">
+    <div class="panel">
+      <h2>Products</h2>
+      <div class="product-list">${rows}</div>
+    </div>
+    <div class="panel">
+      <h2>Current sale</h2>
+      <div>${cartRows}</div>
+      <div class="cart-total">
+        <span>Total</span>
+        <span class="amt mono" id="cart-total-amt">${money(total)}</span>
+      </div>
+      ${hasCart ? `
+      <div class="field" style="margin-top:14px;">
+        <label>Amount received</label>
+        <input id="in-tendered" type="number" step="0.01" inputmode="decimal" placeholder="0.00" value="${state.tendered}">
+      </div>
+      <div class="cart-total" style="border-top:none; padding-top:0; margin-top:0;">
+        <span>Change (sukli)</span>
+        <span class="amt mono" id="change-amount" style="color:${change < 0 ? 'var(--red)' : 'var(--green)'};">${money(Math.max(change,0))}</span>
+      </div>
+      <div id="insufficient-msg" style="color:var(--red); font-size:12.5px; margin-top:8px;">${insufficientAmount ? (!tenderedEntered ? 'Enter the amount received before completing the sale.' : 'Amount received is less than the total.') : ''}</div>
+      ` : ''}
+      <button class="primary" id="btn-checkout" ${!canCheckout?'disabled':''}>${state.checkingOut ? 'Saving...' : 'Complete sale'}</button>
+    </div>
+  </div>`;
+}
+
+function renderProducts(){
+  const rows = state.products.map(p => `
+    <div class="product-row" data-edit="${p.id}">
+      <div>
+        <div class="name">${p.name}</div>
+        <div class="meta">${p.stock} in stock</div>
+      </div>
+      <div style="display:flex; align-items:center; gap:10px;">
+        <div class="price mono">${money(p.price)}</div>
+        <button class="icon-btn" data-del="${p.id}" title="Delete">\u2715</button>
+      </div>
+    </div>
+  `).join('') || `<div class="empty">No products yet.</div>`;
+
+  const ed = state.editing;
+  const current = ed ? state.products.find(p=>p.id===ed.id) : null;
+
+  const leftPanel = ed ? `
+      <h2>Edit ${ed.name}</h2>
+      <div class="field">
+        <label>Name</label>
+        <input id="ep-name" value="${ed.name}">
+      </div>
+      <div class="field">
+        <label>Price</label>
+        <input id="ep-price" type="number" step="0.01" value="${ed.price}">
+      </div>
+      <button class="primary" id="btn-save-product">Save changes</button>
+      <div style="border-top:1px solid var(--line); margin:18px 0 14px;"></div>
+      <h2>Restock</h2>
+      <div class="meta" style="font-size:12px; color:var(--ink-dim); margin-bottom:10px;">
+        Current stock: <span class="mono">${current ? current.stock : 0}</span>. Stock goes down automatically on every sale.
+      </div>
+      <div class="row2">
+        <div class="field">
+          <label>Add pieces</label>
+          <input id="rs-qty" type="number" min="1" step="1" placeholder="0" value="${state.restockQty}">
+        </div>
+        <div class="field">
+          <label>&nbsp;</label>
+          <button class="ghost" id="btn-restock" style="width:100%; padding:9px;">Add to stock</button>
+        </div>
+      </div>
+      <button class="ghost" id="btn-cancel-edit" style="width:100%;">Done</button>
+  ` : `
+      <h2>Add a product</h2>
+      <div class="field">
+        <label>Name</label>
+        <input id="np-name" placeholder="e.g. Band shirt">
+      </div>
+      <div class="row2">
+        <div class="field">
+          <label>Price</label>
+          <input id="np-price" type="number" step="0.01" placeholder="0.00">
+        </div>
+        <div class="field">
+          <label>Starting stock</label>
+          <input id="np-stock" type="number" placeholder="0">
+        </div>
+      </div>
+      <button class="primary" id="btn-add-product">Add product</button>
+  `;
+
+  return `
+  <div class="grid">
+    <div class="panel">${leftPanel}</div>
+    <div class="panel">
+      <h2>All products <span style="font-weight:400; color:var(--ink-dim);">\u2014 tap one to edit or restock</span></h2>
+      <div class="product-list">${rows}</div>
+    </div>
+  </div>`;
+}
+
+function renderHistory(){
+  const rows = state.sales.map(s => {
+    const d = new Date(s.created_at);
+    const itemsStr = (s.sale_items||[]).map(i=>`${i.qty}\u00D7 ${i.product_name}`).join(', ');
+    return `
+    <div class="sale-row">
+      <div class="head">
+        <span>${d.toLocaleString()}</span>
+        <span class="amt mono">${money(s.total)}</span>
+      </div>
+      <div class="items">${itemsStr}</div>
+    </div>`;
+  }).join('') || `<div class="empty">No sales yet.</div>`;
+
+  return `<div class="panel">${rows}</div>`;
+}
+
+function renderSaleItems(){
+  const byProduct = {};
+  for(const it of state.saleItems){
+    const key = it.product_name;
+    if(!byProduct[key]) byProduct[key] = { qty: 0, revenue: 0 };
+    byProduct[key].qty += it.qty;
+    byProduct[key].revenue += it.price * it.qty;
+  }
+  const summaryRows = Object.entries(byProduct)
+    .sort((a,b)=> b[1].revenue - a[1].revenue)
+    .map(([name, s]) => `
+      <div class="product-row">
+        <div>
+          <div class="name">${name}</div>
+          <div class="meta">${s.qty} sold</div>
+        </div>
+        <div class="price mono">${money(s.revenue)}</div>
+      </div>
+    `).join('') || `<div class="empty">No sale items yet.</div>`;
+
+  const listRows = state.saleItems.map(it => {
+    const d = it.sales && it.sales.created_at ? new Date(it.sales.created_at) : null;
+    return `
+    <div class="sale-row">
+      <div class="head">
+        <span>${d ? d.toLocaleString() : ''}</span>
+        <span class="amt mono">${money(it.price * it.qty)}</span>
+      </div>
+      <div class="items">${it.qty}\u00D7 ${it.product_name} @ ${money(it.price)}</div>
+    </div>`;
+  }).join('') || `<div class="empty">No sale items yet.</div>`;
+
+  return `
+  <div class="grid">
+    <div class="panel">
+      <h2>Total sold per product</h2>
+      <div class="product-list">${summaryRows}</div>
+    </div>
+    <div class="panel">
+      <h2>All sale items</h2>
+      <div>${listRows}</div>
+    </div>
+  </div>`;
+}
+
+function renderConsign(){
+  const opts = ['<option value="">Pick a product\u2026</option>'].concat(
+    state.products.map(p=>`<option value="${p.id}" ${state.consignPick===p.id?'selected':''}>${p.name} \u2014 ${p.stock} in stock</option>`)
+  ).join('');
+
+  const draftRows = state.consignDraft.map(d => `
+    <div class="cons-item">
+      <div class="nm">${d.name}<div class="sub">${d.qty} pcs \u00D7 ${money(d.price)}</div></div>
+      <div class="mono">${money(d.price*d.qty)}</div>
+      <button class="icon-btn" data-draft-del="${d.product_id}" title="Remove">\u2715</button>
+    </div>`).join('') || `<div class="empty">No items added yet.</div>`;
+
+  const history = state.consignments.map(c => {
+    const items = c.consignment_items || [];
+    const dt = new Date(c.created_at);
+    const open = c.status !== 'closed';
+    const sent = items.reduce((s,i)=> s + (i.qty_sent||0), 0);
+    const sold = items.reduce((s,i)=> s + (i.qty_sold||0), 0);
+    const ret = items.reduce((s,i)=> s + (i.qty_returned||0), 0);
+    const soldValue = items.reduce((s,i)=> s + i.price*(i.qty_sold||0), 0);
+
+    const itemRows = items.map(i => {
+      if(open){
+        const st = state.settle[i.id] || {};
+        const remaining = (i.qty_sent||0) - (Number(st.sold)||0) - (Number(st.returned)||0);
+        return `
+        <div class="cons-item">
+          <div class="nm">${i.product_name}
+            <div class="sub">${i.qty_sent} sent @ ${money(i.price)} \u00B7 <span data-remain="${i.id}">${remaining}</span> not yet accounted</div>
+          </div>
+          <div>
+            <label>Sold</label>
+            <input class="num-sm" type="number" min="0" step="1" data-sold="${i.id}" value="${st.sold === undefined ? '' : st.sold}">
+          </div>
+          <div>
+            <label>Returned</label>
+            <input class="num-sm" type="number" min="0" step="1" data-ret="${i.id}" value="${st.returned === undefined ? '' : st.returned}">
+          </div>
+        </div>`;
+      }
+      const left = (i.qty_sent||0) - (i.qty_sold||0) - (i.qty_returned||0);
+      return `
+        <div class="cons-item">
+          <div class="nm">${i.product_name}
+            <div class="sub">${i.qty_sent} sent \u00B7 ${i.qty_sold||0} sold \u00B7 ${i.qty_returned||0} returned${left>0 ? ' \u00B7 ' + left + ' missing' : ''}</div>
+          </div>
+          <div class="mono">${money(i.price*(i.qty_sold||0))}</div>
+        </div>`;
+    }).join('');
+
+    return `
+    <div class="sale-row">
+      <div class="head">
+        <span>${c.consignee} <span class="tag ${open?'open':'closed'}">${open?'Out':'Settled'}</span></span>
+        <span class="amt mono">${money(soldValue)}</span>
+      </div>
+      <div class="items">${dt.toLocaleString()} \u00B7 ${sent} pcs sent${open ? '' : ' \u00B7 ' + sold + ' sold \u00B7 ' + ret + ' returned'}${c.note ? ' \u00B7 ' + c.note : ''}</div>
+      ${itemRows}
+      ${open ? `<button class="primary" data-settle="${c.id}" ${state.busy?'disabled':''}>${state.busy ? 'Saving...' : 'Record sold / returned'}</button>` : ''}
+    </div>`;
+  }).join('') || `<div class="empty">No consignments yet.</div>`;
+
+  return `
+  <div class="grid">
+    <div class="panel">
+      <h2>Send items out</h2>
+      <div class="field">
+        <label>Who receives it (person or branch)</label>
+        <input id="cs-consignee" placeholder="e.g. Ate Mhel / Branch 2" value="${state.consignee}">
+      </div>
+      <div class="field">
+        <label>Note (optional)</label>
+        <input id="cs-note" placeholder="e.g. bazaar sa Sabado" value="${state.consignNote}">
+      </div>
+      <div class="field">
+        <label>Product</label>
+        <select id="cs-product">${opts}</select>
+      </div>
+      <div class="row2">
+        <div class="field">
+          <label>Quantity</label>
+          <input id="cs-qty" type="number" min="1" step="1" placeholder="0" value="${state.consignPickQty}">
+        </div>
+        <div class="field">
+          <label>&nbsp;</label>
+          <button class="ghost" id="btn-cs-add" style="width:100%; padding:9px;">Add item</button>
+        </div>
+      </div>
+      <div style="border-top:1px solid var(--line); margin:6px 0 10px;"></div>
+      <div>${draftRows}</div>
+      <div class="cart-total">
+        <span>Value sent out</span>
+        <span class="amt mono">${money(consignDraftTotal())}</span>
+      </div>
+      <button class="primary" id="btn-cs-send" ${state.busy || state.consignDraft.length===0 ? 'disabled' : ''}>${state.busy ? 'Saving...' : 'Send consignment'}</button>
+      <div class="setup-note">Sent pieces are taken out of shop stock. Pag-return, ilagay lang kung ilan ang nabenta at ilan ang nagbalik \u2014 ang nabenta ay masasama sa sales, at ang nagbalik ay babalik sa stock.</div>
+    </div>
+    <div class="panel">
+      <h2>Consignment history</h2>
+      <div>${history}</div>
+    </div>
+  </div>`;
+}
+
+function render(){
+  const app = document.getElementById('app');
+  let body;
+  if(!state.connected){
+    body = renderSettings();
+  } else if(state.tab === 'pos'){
+    body = renderPOS();
+  } else if(state.tab === 'products'){
+    body = renderProducts();
+  } else if(state.tab === 'settings'){
+    body = renderSettings();
+  } else if(state.tab === 'items'){
+    body = renderSaleItems();
+  } else if(state.tab === 'consign'){
+    body = renderConsign();
+  } else {
+    body = renderHistory();
+  }
+
+  app.innerHTML = `
+    <header class="top">
+      <div>
+        <h1 class="serif">CCFACO POS</h1>
+        <div class="sub">Design by: Arvin B.</div>
+      </div>
+      ${state.connected ? `
+      <nav class="tabs">
+        <button data-tab="pos" class="${state.tab==='pos'?'active':''}">Sell</button>
+        <button data-tab="products" class="${state.tab==='products'?'active':''}">Products</button>
+        <button data-tab="history" class="${state.tab==='history'?'active':''}">History</button>
+        <button data-tab="items" class="${state.tab==='items'?'active':''}">Sale Items</button>
+        <button data-tab="consign" class="${state.tab==='consign'?'active':''}">Consign</button>
+        <button data-tab="settings" class="${state.tab==='settings'?'active':''}">Settings</button>
+      </nav>` : ''}
+    </header>
+    ${body}
+    ${state.toast ? `<div class="toast ${state.toast.isErr?'err':''}">${state.toast.msg}</div>` : ''}
+  `;
+
+  // wire events
+  app.querySelectorAll('nav.tabs button').forEach(b=>{
+    b.addEventListener('click', ()=>{ state.tab = b.dataset.tab; render();
+      if(state.tab==='history') fetchSales();
+      if(state.tab==='items') fetchSaleItems();
+      if(state.tab==='consign') fetchConsignments();
+    });
+  });
+
+  const connectBtn = document.getElementById('btn-connect');
+  if(connectBtn){
+    connectBtn.addEventListener('click', async ()=>{
+      state.supaUrl = document.getElementById('in-url').value.trim().replace(/\/$/,'');
+      state.supaKey = document.getElementById('in-key').value.trim();
+      await saveConfig();
+      await testConnection();
+      if(state.connected){
+        state.tab = 'pos';
+        await fetchProducts();
+        showToast('Connected to Supabase.');
+      } else {
+        showToast('Could not connect — check your URL and key.', true);
+      }
+      render();
+    });
+  }
+
+  app.querySelectorAll('.product-row[data-id]').forEach(r=>{
+    r.addEventListener('click', ()=>{
+      const p = state.products.find(x=>x.id===r.dataset.id);
+      if(p) addToCart(p);
+    });
+  });
+
+  app.querySelectorAll('[data-inc]').forEach(b=> b.addEventListener('click', ()=> changeQty(b.dataset.inc, 1)));
+  app.querySelectorAll('[data-dec]').forEach(b=> b.addEventListener('click', ()=> changeQty(b.dataset.dec, -1)));
+
+  const checkoutBtn = document.getElementById('btn-checkout');
+  if(checkoutBtn) checkoutBtn.addEventListener('click', checkout);
+
+  const tenderedInput = document.getElementById('in-tendered');
+  if(tenderedInput){
+    tenderedInput.addEventListener('input', ()=>{
+      state.tendered = tenderedInput.value;
+      updateChangeDisplay();
+    });
+  }
+
+  const addProdBtn = document.getElementById('btn-add-product');
+  if(addProdBtn){
+    addProdBtn.addEventListener('click', async ()=>{
+      const name = document.getElementById('np-name').value.trim();
+      const price = document.getElementById('np-price').value;
+      const stock = document.getElementById('np-stock').value || 0;
+      if(!name || !price){ showToast('Enter a name and price.', true); return; }
+      await addProduct(name, price, stock);
+    });
+  }
+
+  app.querySelectorAll('[data-del]').forEach(b=>{
+    b.addEventListener('click', (ev)=>{ ev.stopPropagation(); deleteProduct(b.dataset.del); });
+  });
+
+  /* typed cart quantity */
+  app.querySelectorAll('[data-qty]').forEach(inp=>{
+    inp.addEventListener('input', ()=> setCartQty(inp.dataset.qty, inp.value));
+    inp.addEventListener('blur', ()=> commitCartQty(inp.dataset.qty));
+    inp.addEventListener('keydown', (ev)=>{ if(ev.key === 'Enter') inp.blur(); });
+  });
+
+  /* edit + restock */
+  app.querySelectorAll('[data-edit]').forEach(r=>{
+    r.addEventListener('click', (ev)=>{
+      if(ev.target.hasAttribute('data-del')) return;
+      const p = state.products.find(x=>x.id===r.dataset.edit);
+      if(p){ state.editing = { id: p.id, name: p.name, price: p.price }; state.restockQty = ''; render(); }
+    });
+  });
+  const saveProdBtn = document.getElementById('btn-save-product');
+  if(saveProdBtn){
+    saveProdBtn.addEventListener('click', ()=>{
+      updateProduct(state.editing.id, document.getElementById('ep-name').value.trim(), document.getElementById('ep-price').value);
+    });
+  }
+  const cancelEditBtn = document.getElementById('btn-cancel-edit');
+  if(cancelEditBtn) cancelEditBtn.addEventListener('click', ()=>{ state.editing = null; render(); });
+  const restockBtn = document.getElementById('btn-restock');
+  if(restockBtn){
+    restockBtn.addEventListener('click', ()=>{
+      restockProduct(state.editing.id, document.getElementById('rs-qty').value);
+    });
+  }
+
+  /* consignment */
+  const csConsignee = document.getElementById('cs-consignee');
+  if(csConsignee) csConsignee.addEventListener('input', ()=>{ state.consignee = csConsignee.value; });
+  const csNote = document.getElementById('cs-note');
+  if(csNote) csNote.addEventListener('input', ()=>{ state.consignNote = csNote.value; });
+  const csProduct = document.getElementById('cs-product');
+  if(csProduct) csProduct.addEventListener('change', ()=>{ state.consignPick = csProduct.value; });
+  const csQty = document.getElementById('cs-qty');
+  if(csQty) csQty.addEventListener('input', ()=>{ state.consignPickQty = csQty.value; });
+  const csAddBtn = document.getElementById('btn-cs-add');
+  if(csAddBtn) csAddBtn.addEventListener('click', addConsignDraft);
+  const csSendBtn = document.getElementById('btn-cs-send');
+  if(csSendBtn) csSendBtn.addEventListener('click', sendConsignment);
+  app.querySelectorAll('[data-draft-del]').forEach(b=>{
+    b.addEventListener('click', ()=>{
+      state.consignDraft = state.consignDraft.filter(d=>d.product_id !== b.dataset.draftDel);
+      render();
+    });
+  });
+
+  function bindSettleInput(inp, id, key){
+    inp.addEventListener('input', ()=>{
+      if(!state.settle[id]) state.settle[id] = {};
+      state.settle[id][key] = inp.value;
+      const item = state.consignments
+        .flatMap(c=> c.consignment_items || [])
+        .find(i=> i.id === id);
+      const span = document.querySelector(`[data-remain="${id}"]`);
+      if(item && span){
+        const s = state.settle[id];
+        span.textContent = (item.qty_sent||0) - (Number(s.sold)||0) - (Number(s.returned)||0);
+      }
+    });
+  }
+  app.querySelectorAll('[data-sold]').forEach(inp=> bindSettleInput(inp, inp.dataset.sold, 'sold'));
+  app.querySelectorAll('[data-ret]').forEach(inp=> bindSettleInput(inp, inp.dataset.ret, 'returned'));
+  app.querySelectorAll('[data-settle]').forEach(b=>{
+    b.addEventListener('click', ()=>{
+      const c = state.consignments.find(x=>x.id === b.dataset.settle);
+      if(c) settleConsignment(c);
+    });
+  });
+}
+
+async function init(){
+  await loadConfig();
+  await testConnection();
+  if(state.connected){
+    await fetchProducts();
+  }
+  render();
+}
+
+init();
+</script>
+</body>
+</html>
