@@ -154,6 +154,7 @@
   .icon-btn:hover{ color: var(--red); }
 
   .qty-input{ width:56px; text-align:center; padding:5px 4px; font-size:13px; }
+  .strike{ text-decoration:line-through; opacity:0.75; }
   .num-sm{ width:70px; padding:5px 6px; font-size:13px; text-align:center; }
   .tag{ display:inline-block; font-size:11px; padding:2px 8px; border-radius:10px; border:1px solid var(--line); color:var(--ink-dim); }
   .tag.open{ border-color: var(--gold-dim); color: var(--gold); }
@@ -202,6 +203,10 @@ const state = {
   consignPickQty: '',
   settle: {},           // item_id -> {sold, returned}
   busy: false,
+  members: [],
+  editingMember: null,  // {id, full_name, phone, share_capital} member being edited
+  memberSearch: '',
+  discountCol: false,   // true once the products table has a discount column (see Settings SQL)
 };
 
 function el(html){
@@ -306,7 +311,9 @@ async function restoreAuth(){
   try{
     await fetchCurrentUser();
     await loadProfile();
-    return await testConnection();
+    const ok = await testConnection();
+    if(ok) await checkDiscountColumn();
+    return ok;
   }catch(e){
     clearSession();
     state.session = null;
@@ -336,6 +343,7 @@ async function login(email, password){
     await fetchCurrentUser();
     await loadProfile();
     if(!await testConnection()) throw new Error('Signed in, but the POS tables could not be reached. Check your Supabase setup.');
+    await checkDiscountColumn();
     state.tab = 'pos';
     await fetchProducts();
     welcome = 'Signed in as ' + roleLabel() + '.';
@@ -363,6 +371,9 @@ function logout(){
   state.cart = [];
   state.tendered = '';
   state.authError = '';
+  state.members = [];
+  state.editingMember = null;
+  state.memberSearch = '';
   render();
 }
 
@@ -384,6 +395,7 @@ function switchTab(tab){
   if(tab === 'history') fetchSales();
   if(tab === 'items') fetchSaleItems();
   if(tab === 'consign') fetchConsignments();
+  if(tab === 'members') fetchMembers();
 }
 
 async function fetchProducts(){
@@ -425,12 +437,14 @@ async function fetchSaleItems(){
   state.loading = false; render();
 }
 
-async function addProduct(name, price, stock){
+async function addProduct(name, price, stock, discount){
   if(blockViewer()) return;
+  const row = { name, price: Number(price), stock: Number(stock) };
+  if(state.discountCol && Number(discount) > 0) row.discount = Number(discount);
   try{
     const res = await fetch(`${state.supaUrl}/rest/v1/products`, {
       method:'POST', headers: supaHeaders(),
-      body: JSON.stringify([{ name, price: Number(price), stock: Number(stock) }])
+      body: JSON.stringify([row])
     });
     if(!res.ok) throw new Error('Insert failed');
     await fetchProducts();
@@ -451,6 +465,16 @@ async function deleteProduct(id){
     render();
   }catch(e){
     showToast('Could not delete product: ' + e.message, true);
+  }
+}
+
+// Detect once whether the products table has a discount column (see Settings SQL)
+async function checkDiscountColumn(){
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/products?select=discount&limit=1`, { headers: supaHeaders() });
+    state.discountCol = res.ok;
+  }catch(e){
+    state.discountCol = false;
   }
 }
 
@@ -491,15 +515,32 @@ function commitCartQty(id){
 function updateCartDisplay(){
   for(const c of state.cart){
     const lineEl = document.querySelector(`[data-line="${c.id}"]`);
-    if(lineEl) lineEl.textContent = money(c.price * (Number(c.qty)||0));
+    if(lineEl) lineEl.textContent = money(lineTotal(c));
   }
   const totalEl = document.getElementById('cart-total-amt');
   if(totalEl) totalEl.textContent = money(cartTotal());
   updateChangeDisplay();
 }
 
+// Fixed discount per product: peso amount off per piece, assigned in the Products tab
+function productDiscount(productId){
+  const p = state.products.find(x=>x.id===productId);
+  const n = p ? Number(p.discount) : 0;
+  const base = p ? (Number(p.price) || 0) : 0;
+  return (isNaN(n) || n <= 0) ? 0 : Math.min(n, base);
+}
+
+// price per piece after the product's fixed discount
+function discountedUnitPrice(c){
+  return Math.round((c.price - productDiscount(c.id)) * 100) / 100;
+}
+
+function lineTotal(c){
+  return discountedUnitPrice(c) * (Number(c.qty)||0);
+}
+
 function cartTotal(){
-  return state.cart.reduce((sum,c)=> sum + c.price*c.qty, 0);
+  return state.cart.reduce((sum,c)=> sum + lineTotal(c), 0);
 }
 
 function updateChangeDisplay(){
@@ -549,7 +590,7 @@ async function checkout(){
       sale_id: saleId,
       product_id: c.id,
       product_name: c.name,
-      price: c.price,
+      price: discountedUnitPrice(c),
       qty: c.qty
     }));
     const itemsRes = await fetch(`${state.supaUrl}/rest/v1/sale_items`, {
@@ -581,13 +622,15 @@ async function checkout(){
 
 /* ---------- Edit product / Restock ---------- */
 
-async function updateProduct(id, name, price){
+async function updateProduct(id, name, price, discount){
   if(blockViewer()) return;
   if(!name){ showToast('Enter a product name.', true); return; }
+  const patch = { name, price: Number(price) };
+  if(state.discountCol) patch.discount = Math.max(0, Number(discount) || 0);
   try{
     const res = await fetch(`${state.supaUrl}/rest/v1/products?id=eq.${id}`, {
       method:'PATCH', headers: supaHeaders(),
-      body: JSON.stringify({ name, price: Number(price) })
+      body: JSON.stringify(patch)
     });
     if(!res.ok) throw new Error('Update failed');
     state.editing = null;
@@ -784,6 +827,133 @@ async function settleConsignment(consignment){
   state.busy = false; render();
 }
 
+/* ---------- Members ---------- */
+
+async function fetchMembers(){
+  if(!state.connected) return;
+  state.loading = true; render();
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/members?select=*&order=full_name.asc`, { headers: supaHeaders() });
+    if(!res.ok) throw new Error('Failed to load members. If the members table does not exist yet, run the Members SQL in Settings first.');
+    state.members = await res.json();
+  }catch(e){
+    showToast('Could not load members: ' + e.message, true);
+  }
+  state.loading = false; render();
+}
+
+async function addMember(fullName, phone, shareCapital){
+  if(blockViewer()) return;
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/members`, {
+      method:'POST', headers: supaHeaders(),
+      body: JSON.stringify([{ full_name: fullName, phone: phone || null, share_capital: Number(shareCapital || 0) }])
+    });
+    if(!res.ok) throw new Error('Insert failed');
+    await fetchMembers();
+    showToast('Member added.');
+  }catch(e){
+    showToast('Could not add member: ' + e.message, true);
+  }
+}
+
+async function updateMember(id, fullName, phone, shareCapital){
+  if(blockViewer()) return;
+  if(!fullName){ showToast('Enter the member name.', true); return; }
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/members?id=eq.${id}`, {
+      method:'PATCH', headers: supaHeaders(),
+      body: JSON.stringify({ full_name: fullName, phone: phone || null, share_capital: Number(shareCapital || 0) })
+    });
+    if(!res.ok) throw new Error('Update failed');
+    state.editingMember = null;
+    await fetchMembers();
+    showToast('Member updated.');
+  }catch(e){
+    showToast('Could not update member: ' + e.message, true);
+  }
+}
+
+async function deleteMember(id){
+  if(blockViewer()) return;
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/members?id=eq.${id}`, {
+      method:'DELETE', headers: supaHeaders()
+    });
+    if(!res.ok) throw new Error('Delete failed');
+    state.members = state.members.filter(m=>m.id!==id);
+    render();
+  }catch(e){
+    showToast('Could not delete member: ' + e.message, true);
+  }
+}
+
+function filteredMembers(){
+  const q = state.memberSearch.trim().toLowerCase();
+  if(!q) return state.members;
+  return state.members.filter(m =>
+    String(m.full_name||'').toLowerCase().includes(q) ||
+    String(m.phone||'').toLowerCase().includes(q));
+}
+
+function memberRowHtml(m){
+  return '<div class="product-row" data-medit="' + m.id + '">' +
+    '<div><div class="name">' + escapeHtml(m.full_name) + '</div><div class="meta">' + (m.phone ? escapeHtml(m.phone) : 'No contact number') + '</div></div>' +
+    '<div style="display:flex; align-items:center; gap:10px;"><div class="price mono">' + money(m.share_capital||0) + '</div>' +
+    (isViewer() ? '' : '<button class="icon-btn" data-mdel="' + m.id + '" title="Delete">✕</button>') + '</div></div>';
+}
+
+function memberRowsHtml(){
+  return filteredMembers().map(memberRowHtml).join('') ||
+    (state.memberSearch.trim() ? '<div class="empty">No members match your search.</div>' : '<div class="empty">No members yet.</div>');
+}
+
+function wireMemberRows(){
+  const app = document.getElementById('app');
+  app.querySelectorAll('.product-row[data-medit]').forEach(r=>{
+    r.addEventListener('click', (ev)=>{
+      if(blockViewer()) return;
+      if(ev.target.hasAttribute('data-mdel')) return;
+      const m = state.members.find(x=>x.id===r.dataset.medit);
+      if(m){ state.editingMember = { id: m.id, full_name: m.full_name, phone: m.phone, share_capital: m.share_capital }; render(); }
+    });
+  });
+  app.querySelectorAll('[data-mdel]').forEach(b=>{
+    b.addEventListener('click', (ev)=>{ ev.stopPropagation(); deleteMember(b.dataset.mdel); });
+  });
+}
+
+function updateMemberList(){
+  const listEl = document.getElementById('member-list');
+  if(!listEl) return;
+  listEl.innerHTML = memberRowsHtml();
+  wireMemberRows();
+}
+
+function renderMembers(){
+  const em = state.editingMember;
+  const leftPanel = isViewer() ?
+    '<h2>Members</h2><div class="setup-note">Regular access is view-only. Members cannot be added or changed here.</div>' :
+    (em ?
+      '<h2>Edit ' + escapeHtml(em.full_name) + '</h2>' +
+      '<div class="field"><label>Full name</label><input id="em-name" value="' + escapeHtml(em.full_name) + '"></div>' +
+      '<div class="field"><label>Contact number</label><input id="em-phone" value="' + escapeHtml(em.phone || '') + '"></div>' +
+      '<div class="field"><label>Share capital</label><input id="em-cap" type="number" step="0.01" value="' + (em.share_capital || 0) + '"></div>' +
+      '<button class="primary" id="btn-save-member">Save changes</button>' +
+      '<div style="border-top:1px solid var(--line); margin:18px 0 14px;"></div>' +
+      '<button class="ghost" id="btn-cancel-member" style="width:100%;">Done</button>' :
+      '<h2>Add a member</h2>' +
+      '<div class="field"><label>Full name</label><input id="nm-name" placeholder="e.g. Juan Dela Cruz"></div>' +
+      '<div class="field"><label>Contact number</label><input id="nm-phone" placeholder="e.g. 0917 123 4567"></div>' +
+      '<div class="field"><label>Share capital</label><input id="nm-cap" type="number" step="0.01" placeholder="0.00"></div>' +
+      '<button class="primary" id="btn-add-member">Add member</button>');
+
+  return '<div class="grid"><div class="panel">' + leftPanel + '</div><div class="panel">' +
+    '<h2>All members <span style="font-weight:400; color:var(--ink-dim);">— ' + (isViewer() ? 'view only' : 'tap one to edit') + '</span></h2>' +
+    '<div class="field"><input id="in-member-search" placeholder="Search name or contact number..." value="' + escapeHtml(state.memberSearch) + '"></div>' +
+    '<div class="product-list" id="member-list">' + memberRowsHtml() + '</div></div></div>';
+}
+
 function renderAdminSettings(){
   return `
   <div class="panel" style="max-width:520px;">
@@ -963,6 +1133,29 @@ create policy "authenticated can read consignment_items" on consignment_items fo
 create policy "staff can write consignment_items" on consignment_items for all to authenticated using (public.current_user_role() in ('admin','cashier')) with check (public.current_user_role() in ('admin','cashier'));</code>
         <div class="setup-note">After running this SQL, sign out and sign in again. The Settings tab is hidden and blocked for Cashier and Regular accounts.</div>
       </div>
+
+      <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
+        <h2>Product discounts</h2>
+        <div class="setup-note">Gusto mo bang may fixed discount ang bawat product (₱ off per piece)? I-run ito nang isang beses sa SQL editor. Kapag tapos na, automatic na lalabas ang Discount field sa Add/Edit product at ibabawas na ito sa presyo sa Sell tab — walang kailangang i-type pa ang cashier.</div>
+        <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">alter table products add column if not exists discount numeric not null default 0;</code>
+      </div>
+
+      <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
+        <h2>Members</h2>
+        <div class="setup-note">Run this once in the SQL editor so the Members tab works. Ito ay directory lang ng mga miyembro &mdash; hindi umaapekto sa sales, products, o consignment. I-run muna ang <strong>User access roles</strong> SQL sa itaas (kailangan ng <code>current_user_role()</code> function) bago ito.</div>
+        <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">create table if not exists members (
+  id uuid primary key default gen_random_uuid(),
+  full_name text not null,
+  phone text,
+  share_capital numeric not null default 0,
+  created_at timestamptz default now()
+);
+
+alter table members enable row level security;
+
+create policy "authenticated can read members" on members for select to authenticated using (true);
+create policy "staff can write members" on members for all to authenticated using (public.current_user_role() in ('admin','cashier')) with check (public.current_user_role() in ('admin','cashier'));</code>
+      </div>
     </div>
   </div>`;
 }
@@ -993,15 +1186,21 @@ function renderLogin(){
 function renderSettings(){ return renderAdminSettings(); }
 
 function renderPOS(){
-  const rows = state.products.map(p => `
+  const rows = state.products.map(p => {
+    const disc = state.discountCol ? productDiscount(p.id) : 0;
+    const priceHtml = disc > 0
+      ? '<span class="strike">' + money(p.price) + '</span> ' + money(discountedUnitPrice(p))
+      : money(p.price);
+    const discMeta = disc > 0 ? ' · ' + money(disc) + ' off' : '';
+    return `
     <div class="product-row" data-id="${p.id}">
       <div>
         <div class="name">${p.name}</div>
-        <div class="meta">${p.stock} in stock</div>
+        <div class="meta">${p.stock} in stock${discMeta}</div>
       </div>
-      <div class="price mono">${money(p.price)}</div>
-    </div>
-  `).join('') || `<div class="empty">No products yet. Add some in the Products tab.</div>`;
+      <div class="price mono">${priceHtml}</div>
+    </div>`;
+  }).join('') || `<div class="empty">No products yet. Add some in the Products tab.</div>`;
 
   const cartRows = state.cart.map(c => `
     <div class="cart-row">
@@ -1011,7 +1210,7 @@ function renderPOS(){
         <input class="qty-input mono" data-qty="${c.id}" type="number" min="0" step="1" inputmode="numeric" value="${c.qty}">
         <button data-inc="${c.id}">+</button>
       </div>
-      <div class="mono" data-line="${c.id}" style="width:70px; text-align:right;">${money(c.price*(Number(c.qty)||0))}</div>
+      <div class="mono" data-line="${c.id}" style="width:70px; text-align:right;">${money(lineTotal(c))}</div>
     </div>
   `).join('') || `<div class="empty">Cart is empty. Tap a product to add it.</div>`;
 
@@ -1052,10 +1251,15 @@ function renderPOS(){
   </div>`;
 }
 
+function productDiscountLabel(p){
+  const d = productDiscount(p.id);
+  return d > 0 ? ' \u00B7 ' + money(d) + ' off' : '';
+}
+
 function renderProducts(){
   const rows = state.products.map(p =>     '<div class="product-row" data-edit="' + p.id + '" style="' + (isViewer() ? 'cursor:default;' : '') + '">' +
-      '<div><div class="name">' + p.name + '</div><div class="meta">' + p.stock + ' in stock</div></div>' +
-      '<div style="display:flex; align-items:center; gap:10px;"><div class="price mono">' + money(p.price) + '</div>' +
+      '<div><div class="name">' + p.name + '</div><div class="meta">' + p.stock + ' in stock' + (state.discountCol ? productDiscountLabel(p) : '') + '</div></div>' +
+      '<div style="display:flex; align-items:center; gap:10px;"><div class="price mono">' + (state.discountCol && productDiscount(p.id) > 0 ? '<span class="strike">' + money(p.price) + '</span> ' + money(discountedUnitPrice(p)) : money(p.price)) + '</div>' +
       (isViewer() ? '' : '<button class="icon-btn" data-del="' + p.id + '" title="Delete">\u2715</button>') + '</div></div>'
   ).join('') || '<div class="empty">No products yet.</div>';
 
@@ -1067,6 +1271,7 @@ function renderProducts(){
       '<h2>Edit ' + ed.name + '</h2>' +
       '<div class="field"><label>Name</label><input id="ep-name" value="' + ed.name + '"></div>' +
       '<div class="field"><label>Price</label><input id="ep-price" type="number" step="0.01" value="' + ed.price + '"></div>' +
+      (state.discountCol ? '<div class="field"><label>Discount (₱ off per piece)</label><input id="ep-disc" type="number" min="0" step="0.01" placeholder="0" value="' + (ed.discount || 0) + '"></div>' : '') +
       '<button class="primary" id="btn-save-product">Save changes</button>' +
       '<div style="border-top:1px solid var(--line); margin:18px 0 14px;"></div>' +
       '<h2>Restock</h2>' +
@@ -1078,6 +1283,7 @@ function renderProducts(){
       '<div class="field"><label>Name</label><input id="np-name" placeholder="e.g. Band shirt"></div>' +
       '<div class="row2"><div class="field"><label>Price</label><input id="np-price" type="number" step="0.01" placeholder="0.00"></div>' +
       '<div class="field"><label>Starting stock</label><input id="np-stock" type="number" placeholder="0"></div></div>' +
+      (state.discountCol ? '<div class="field"><label>Discount (₱ off per piece)</label><input id="np-disc" type="number" min="0" step="0.01" placeholder="0"></div>' : '') +
       '<button class="primary" id="btn-add-product">Add product</button>');
 
   return '<div class="grid"><div class="panel">' + leftPanel + '</div><div class="panel">' +
@@ -1263,6 +1469,8 @@ function render(){
     body = renderPOS();
   } else if(state.tab === 'products'){
     body = renderProducts();
+  } else if(state.tab === 'members'){
+    body = renderMembers();
   } else if(state.tab === 'settings'){
     body = isAdmin() ? renderSettings() : renderPOS();
   } else if(state.tab === 'items'){
@@ -1278,6 +1486,8 @@ function render(){
     '<nav class="tabs">' +
       (isViewer() ? '' : '<button data-tab="pos" class="' + active('pos') + '">Sell</button>') +
       '<button data-tab="products" class="' + active('products') + '">Products</button>' +
+      // discount is a fixed peso amount per product, set in the Products tab
+      '<button data-tab="members" class="' + active('members') + '">Members</button>' +
       '<button data-tab="history" class="' + active('history') + '">History</button>' +
       '<button data-tab="items" class="' + active('items') + '">Sale Items</button>' +
       '<button data-tab="consign" class="' + active('consign') + '">Consign</button>' +
@@ -1380,8 +1590,10 @@ function render(){
       const name = document.getElementById('np-name').value.trim();
       const price = document.getElementById('np-price').value;
       const stock = document.getElementById('np-stock').value || 0;
+      const discInput = document.getElementById('np-disc');
+      const discount = discInput ? discInput.value : 0;
       if(!name || !price){ showToast('Enter a name and price.', true); return; }
-      await addProduct(name, price, stock);
+      await addProduct(name, price, stock, discount);
     });
   }
 
@@ -1402,13 +1614,14 @@ function render(){
       if(blockViewer()) return;
       if(ev.target.hasAttribute('data-del')) return;
       const p = state.products.find(x=>x.id===r.dataset.edit);
-      if(p){ state.editing = { id: p.id, name: p.name, price: p.price }; state.restockQty = ''; render(); }
+      if(p){ state.editing = { id: p.id, name: p.name, price: p.price, discount: Number(p.discount) || 0 }; state.restockQty = ''; render(); }
     });
   });
   const saveProdBtn = document.getElementById('btn-save-product');
   if(saveProdBtn){
     saveProdBtn.addEventListener('click', ()=>{
-      updateProduct(state.editing.id, document.getElementById('ep-name').value.trim(), document.getElementById('ep-price').value);
+      const discInput = document.getElementById('ep-disc');
+      updateProduct(state.editing.id, document.getElementById('ep-name').value.trim(), document.getElementById('ep-price').value, discInput ? discInput.value : 0);
     });
   }
   const cancelEditBtn = document.getElementById('btn-cancel-edit');
@@ -1419,6 +1632,34 @@ function render(){
       restockProduct(state.editing.id, document.getElementById('rs-qty').value);
     });
   }
+
+  /* members */
+  wireMemberRows();
+  const memberSearchInput = document.getElementById('in-member-search');
+  if(memberSearchInput){
+    memberSearchInput.addEventListener('input', ()=>{
+      state.memberSearch = memberSearchInput.value;
+      updateMemberList();
+    });
+  }
+  const addMemberBtn = document.getElementById('btn-add-member');
+  if(addMemberBtn){
+    addMemberBtn.addEventListener('click', async ()=>{
+      const name = document.getElementById('nm-name').value.trim();
+      const phone = document.getElementById('nm-phone').value.trim();
+      const cap = document.getElementById('nm-cap').value || 0;
+      if(!name){ showToast('Enter the member name.', true); return; }
+      await addMember(name, phone, cap);
+    });
+  }
+  const saveMemberBtn = document.getElementById('btn-save-member');
+  if(saveMemberBtn){
+    saveMemberBtn.addEventListener('click', ()=>{
+      updateMember(state.editingMember.id, document.getElementById('em-name').value.trim(), document.getElementById('em-phone').value.trim(), document.getElementById('em-cap').value);
+    });
+  }
+  const cancelMemberBtn = document.getElementById('btn-cancel-member');
+  if(cancelMemberBtn) cancelMemberBtn.addEventListener('click', ()=>{ state.editingMember = null; render(); });
 
   /* consignment */
   const csConsignee = document.getElementById('cs-consignee');
