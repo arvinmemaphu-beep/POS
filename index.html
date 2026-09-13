@@ -1269,7 +1269,7 @@ function render(){
   const active = tab => state.tab === tab ? 'active' : '';
   const nav = state.connected ?
     '<nav class="tabs">' +
-      '<button data-tab="pos" class="' + active('pos') + '">Sell</button>' +
+      (isViewer() ? '' : '<button data-tab="pos" class="' + active('pos') + '">Sell</button>') +
       '<button data-tab="products" class="' + active('products') + '">Products</button>' +
       '<button data-tab="history" class="' + active('history') + '">History</button>' +
       '<button data-tab="items" class="' + active('items') + '">Sale Items</button>' +
@@ -1285,6 +1285,11 @@ function render(){
     body +
     (state.toast ? '<div class="toast ' + (state.toast.isErr ? 'err' : '') + '">' + escapeHtml(state.toast.msg) + '</div>' : '');
 
+  if(isViewer() && state.tab === 'pos'){
+    state.tab = 'products';
+    render();
+    return;
+  }
   if(isViewer() && state.tab === 'products'){
     const productEditor = app.querySelector('.grid > .panel');
     if(productEditor) productEditor.style.display = 'none';
