@@ -859,7 +859,10 @@ async function addMember(fullName, phone, shareCapital){
       method:'POST', headers: supaHeaders(),
       body: JSON.stringify([{ full_name: fullName, phone: phone || null, share_capital: Number(shareCapital || 0) }])
     });
-    if(!res.ok) throw new Error('Insert failed');
+    if(!res.ok){
+      const errBody = await res.json().catch(()=>({}));
+      throw new Error(errBody.message || errBody.hint || `Insert failed (${res.status})`);
+    }
     await fetchMembers();
     showToast('Member added.');
   }catch(e){
@@ -875,7 +878,10 @@ async function updateMember(id, fullName, phone, shareCapital){
       method:'PATCH', headers: supaHeaders(),
       body: JSON.stringify({ full_name: fullName, phone: phone || null, share_capital: Number(shareCapital || 0) })
     });
-    if(!res.ok) throw new Error('Update failed');
+    if(!res.ok){
+      const errBody = await res.json().catch(()=>({}));
+      throw new Error(errBody.message || errBody.hint || `Update failed (${res.status})`);
+    }
     state.editingMember = null;
     await fetchMembers();
     showToast('Member updated.');
