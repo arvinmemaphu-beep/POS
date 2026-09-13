@@ -315,7 +315,7 @@ async function restoreAuth(){
     await fetchCurrentUser();
     await loadProfile();
     const ok = await testConnection();
-    if(ok){ await checkDiscountColumn(); await checkConsignMemberColumn(); await fetchMembers(); }
+    if(ok){ await checkDiscountColumn(); await checkConsignMemberColumn(); await fetchProducts(); await fetchMembers(); }
     return ok;
   }catch(e){
     clearSession();
