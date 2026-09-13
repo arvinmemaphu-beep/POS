@@ -202,6 +202,8 @@ const state = {
   consignPickQty: '',
   settle: {},           // item_id -> {sold, returned}
   busy: false,
+  memberDiscount: 0,    // fixed amount discount for members, set by Admin in Settings
+  isMember: false,      // whether the current sale is for a member
 };
 
 function el(html){
@@ -338,6 +340,7 @@ async function login(email, password){
     if(!await testConnection()) throw new Error('Signed in, but the POS tables could not be reached. Check your Supabase setup.');
     state.tab = 'pos';
     await fetchProducts();
+    await fetchMemberDiscount();
     welcome = 'Signed in as ' + roleLabel() + '.';
   }catch(e){
     clearSession();
@@ -362,6 +365,7 @@ function logout(){
   state.tab = 'pos';
   state.cart = [];
   state.tendered = '';
+  state.isMember = false;
   state.authError = '';
   render();
 }
@@ -423,6 +427,35 @@ async function fetchSaleItems(){
     showToast('Could not load sale items: ' + e.message, true);
   }
   state.loading = false; render();
+}
+
+async function fetchMemberDiscount(){
+  if(!state.connected) return;
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/settings?select=value&key=eq.member_discount`, { headers: supaHeaders() });
+    if(res.ok){
+      const rows = await res.json();
+      state.memberDiscount = (rows[0] && rows[0].value && Number(rows[0].value.amount)) || 0;
+    }
+  }catch(e){ /* keep previous/default discount if this fails */ }
+}
+
+async function saveMemberDiscount(amount){
+  if(blockViewer()) return;
+  const clean = isNaN(Number(amount)) || Number(amount) < 0 ? 0 : Number(amount);
+  try{
+    const headers = Object.assign({}, supaHeaders(), { 'Prefer': 'resolution=merge-duplicates,return=representation' });
+    const res = await fetch(`${state.supaUrl}/rest/v1/settings`, {
+      method:'POST', headers,
+      body: JSON.stringify([{ key: 'member_discount', value: { amount: clean } }])
+    });
+    if(!res.ok) throw new Error('Save failed');
+    state.memberDiscount = clean;
+    showToast('Member discount saved \u2014 ' + money(clean) + '.');
+    render();
+  }catch(e){
+    showToast('Could not save discount: ' + e.message, true);
+  }
 }
 
 async function addProduct(name, price, stock){
@@ -493,13 +526,32 @@ function updateCartDisplay(){
     const lineEl = document.querySelector(`[data-line="${c.id}"]`);
     if(lineEl) lineEl.textContent = money(c.price * (Number(c.qty)||0));
   }
+  const d = discountAmount();
+  const subtotalRow = document.getElementById('subtotal-row');
+  const discountRow = document.getElementById('discount-row');
+  const subtotalEl = document.getElementById('subtotal-amt');
+  const discountEl = document.getElementById('discount-amt');
+  if(subtotalRow) subtotalRow.style.display = d > 0 ? 'flex' : 'none';
+  if(discountRow) discountRow.style.display = d > 0 ? 'flex' : 'none';
+  if(subtotalEl) subtotalEl.textContent = money(cartSubtotal());
+  if(discountEl) discountEl.textContent = '\u2212' + money(d);
   const totalEl = document.getElementById('cart-total-amt');
   if(totalEl) totalEl.textContent = money(cartTotal());
   updateChangeDisplay();
 }
 
-function cartTotal(){
+function cartSubtotal(){
   return state.cart.reduce((sum,c)=> sum + c.price*c.qty, 0);
+}
+
+function discountAmount(){
+  if(!state.isMember) return 0;
+  return Math.max(0, Math.min(state.memberDiscount, cartSubtotal()));
+}
+
+// Final total the customer pays, after the member discount is auto-deducted
+function cartTotal(){
+  return Math.max(0, cartSubtotal() - discountAmount());
 }
 
 function updateChangeDisplay(){
@@ -570,6 +622,7 @@ async function checkout(){
     }
     state.cart = [];
     state.tendered = '';
+    state.isMember = false;
     await fetchProducts();
     showToast('Sale recorded — ' + money(total));
   }catch(e){
@@ -964,6 +1017,29 @@ create policy "staff can write consignment_items" on consignment_items for all t
         <div class="setup-note">After running this SQL, sign out and sign in again. The Settings tab is hidden and blocked for Cashier and Regular accounts.</div>
       </div>
     </div>
+  </div>
+  <div class="panel" style="max-width:520px; margin-top:16px;">
+    <h2>Member discount</h2>
+    <div class="setup-note">
+      Run this once (in addition to the tables above) so the discount amount can be saved and shared with every device:
+      <br><br>
+      <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:6px;">create table if not exists settings (
+  key text primary key,
+  value jsonb not null,
+  updated_at timestamptz default now()
+);
+
+alter table settings enable row level security;
+drop policy if exists "authenticated can read settings" on settings;
+drop policy if exists "admin can write settings" on settings;
+create policy "authenticated can read settings" on settings for select to authenticated using (true);
+create policy "admin can write settings" on settings for all to authenticated using (public.current_user_role() = 'admin') with check (public.current_user_role() = 'admin');</code>
+    </div>
+    <div class="field" style="margin-top:14px;">
+      <label>Fixed discount amount for members (auto-deducted at checkout)</label>
+      <input id="in-discount" type="number" step="0.01" min="0" value="${state.memberDiscount}">
+    </div>
+    <button class="primary" id="btn-save-discount" style="width:auto; padding:9px 18px;">Save discount</button>
   </div>`;
 }
 
@@ -1015,6 +1091,8 @@ function renderPOS(){
     </div>
   `).join('') || `<div class="empty">Cart is empty. Tap a product to add it.</div>`;
 
+  const subtotal = cartSubtotal();
+  const discount = discountAmount();
   const total = cartTotal();
   const tenderedNum = Number(state.tendered) || 0;
   const change = tenderedNum - total;
@@ -1031,7 +1109,22 @@ function renderPOS(){
     </div>
     <div class="panel">
       <h2>Current sale</h2>
+      <div class="field" style="margin-bottom:12px;">
+        <label>Customer type</label>
+        <select id="member-select">
+          <option value="regular" ${!state.isMember?'selected':''}>Regular customer</option>
+          <option value="member" ${state.isMember?'selected':''}>Member (\u2212${money(state.memberDiscount)} discount)</option>
+        </select>
+      </div>
       <div>${cartRows}</div>
+      <div class="cart-total" id="subtotal-row" style="border-top:none; padding-top:6px; margin-top:0; font-size:13px; color:var(--ink-dim); display:${discount>0?'flex':'none'};">
+        <span>Subtotal</span>
+        <span class="mono" id="subtotal-amt">${money(subtotal)}</span>
+      </div>
+      <div class="cart-total" id="discount-row" style="border-top:none; padding-top:0; margin-top:0; font-size:13px; color:var(--ink-dim); display:${discount>0?'flex':'none'};">
+        <span>Member discount</span>
+        <span class="mono" id="discount-amt">\u2212${money(discount)}</span>
+      </div>
       <div class="cart-total">
         <span>Total</span>
         <span class="amt mono" id="cart-total-amt">${money(total)}</span>
@@ -1353,6 +1446,21 @@ function render(){
   const logoutBtn = document.getElementById('btn-logout');
   if(logoutBtn) logoutBtn.addEventListener('click', logout);
 
+  const memberSelect = document.getElementById('member-select');
+  if(memberSelect){
+    memberSelect.addEventListener('change', ()=>{
+      state.isMember = memberSelect.value === 'member';
+      render();
+    });
+  }
+
+  const discountBtn = document.getElementById('btn-save-discount');
+  if(discountBtn){
+    discountBtn.addEventListener('click', ()=>{
+      saveMemberDiscount(document.getElementById('in-discount').value);
+    });
+  }
+
   app.querySelectorAll('.product-row[data-id]').forEach(r=>{
     r.addEventListener('click', ()=>{
       const p = state.products.find(x=>x.id===r.dataset.id);
@@ -1466,7 +1574,13 @@ function render(){
 
 async function init(){
   await loadConfig();
-  if(state.supaUrl && state.supaKey) await restoreAuth();
+  if(state.supaUrl && state.supaKey){
+    const ok = await restoreAuth();
+    if(ok){
+      await fetchProducts();
+      await fetchMemberDiscount();
+    }
+  }
   render();
 }
 
