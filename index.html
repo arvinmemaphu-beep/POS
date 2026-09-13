@@ -1201,6 +1201,22 @@ create policy "staff can write members" on members for all to authenticated usin
         <div class="setup-note">Gusto mo bang may discount din pag-settle ng consignment, kapag Member ang kumuha? I-run ito nang isang beses (kailangan muna gumagana ang Members at Product discounts sa itaas). Kapag tapos na, lalabas ang Member dropdown sa "Send items out", at awtomatikong ibabawas ang discount sa presyo pag na-settle na kung Member ang naka-tag doon.</div>
         <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">alter table consignments add column if not exists member_id uuid references members(id);</code>
       </div>
+
+      <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
+        <h2>Allow deleting old products/members</h2>
+        <div class="setup-note">Kung may products o members kang hindi ma-delete (na-block na may error), ito ang dahilan: naka-link na sila sa isang lumang sale o consignment, at hindi pa pinapayagan ni Postgres na burahin ang record na 'yun. I-run ito nang isang beses sa SQL editor &mdash; mananatili pa rin ang sales/consignment history mo, magiging blangko lang ang link kapag na-delete mo na ang product o member.</div>
+        <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">alter table sale_items drop constraint if exists sale_items_product_id_fkey;
+alter table sale_items add constraint sale_items_product_id_fkey
+  foreign key (product_id) references products(id) on delete set null;
+
+alter table consignment_items drop constraint if exists consignment_items_product_id_fkey;
+alter table consignment_items add constraint consignment_items_product_id_fkey
+  foreign key (product_id) references products(id) on delete set null;
+
+alter table consignments drop constraint if exists consignments_member_id_fkey;
+alter table consignments add constraint consignments_member_id_fkey
+  foreign key (member_id) references members(id) on delete set null;</code>
+      </div>
     </div>
   </div>`;
 }
