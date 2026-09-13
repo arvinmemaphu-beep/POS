@@ -208,6 +208,8 @@ const state = {
   memberSearch: '',
   discountCol: false,   // true once the products table has a discount column (see Settings SQL)
   saleMemberId: '',      // id of the member picked for THIS sale in the Sell tab; '' = walk-in, no discount
+  consignMemberId: '',   // member picked when sending a consignment out; discount applies to it at settle time
+  consignMemberCol: false, // true once the consignments table has a member_id column (see Settings SQL)
 };
 
 function el(html){
@@ -313,7 +315,7 @@ async function restoreAuth(){
     await fetchCurrentUser();
     await loadProfile();
     const ok = await testConnection();
-    if(ok){ await checkDiscountColumn(); await fetchMembers(); }
+    if(ok){ await checkDiscountColumn(); await checkConsignMemberColumn(); await fetchMembers(); }
     return ok;
   }catch(e){
     clearSession();
@@ -345,6 +347,7 @@ async function login(email, password){
     await loadProfile();
     if(!await testConnection()) throw new Error('Signed in, but the POS tables could not be reached. Check your Supabase setup.');
     await checkDiscountColumn();
+    await checkConsignMemberColumn();
     state.tab = 'pos';
     await fetchProducts();
     await fetchMembers();
@@ -377,6 +380,7 @@ function logout(){
   state.editingMember = null;
   state.memberSearch = '';
   state.saleMemberId = '';
+  state.consignMemberId = '';
   render();
 }
 
@@ -481,6 +485,16 @@ async function checkDiscountColumn(){
   }
 }
 
+// Detect once whether the consignments table has a member_id column (see Settings SQL)
+async function checkConsignMemberColumn(){
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/consignments?select=member_id&limit=1`, { headers: supaHeaders() });
+    state.consignMemberCol = res.ok;
+  }catch(e){
+    state.consignMemberCol = false;
+  }
+}
+
 function addToCart(product){
   if(blockViewer()) return;
   const existing = state.cart.find(c=>c.id===product.id);
@@ -536,6 +550,12 @@ function productDiscount(productId){
 // the member price for a product, regardless of whether a sale is in progress — used for informational display (Products tab)
 function memberPriceOf(p){
   return Math.round((p.price - productDiscount(p.id)) * 100) / 100;
+}
+
+// price per piece actually charged for a consignment item — the discount only applies if the consignment is tagged to a Member
+function consignUnitPrice(item, consignment){
+  if(!consignment.member_id) return item.price;
+  return Math.round(Math.max(0, item.price - productDiscount(item.product_id)) * 100) / 100;
 }
 
 // price per piece actually charged in the cart — the discount only applies when a member is picked for this sale
@@ -723,9 +743,11 @@ async function sendConsignment(){
   if(state.consignDraft.length === 0){ showToast('Add at least one item.', true); return; }
   state.busy = true; render();
   try{
+    const consignRow = { consignee, note: state.consignNote.trim() || null, status: 'open' };
+    if(state.consignMemberCol && state.consignMemberId) consignRow.member_id = state.consignMemberId;
     const cRes = await fetch(`${state.supaUrl}/rest/v1/consignments`, {
       method:'POST', headers: supaHeaders(),
-      body: JSON.stringify([{ consignee, note: state.consignNote.trim() || null, status: 'open' }])
+      body: JSON.stringify([consignRow])
     });
     if(!cRes.ok) throw new Error('Could not create consignment');
     const consignmentId = (await cRes.json())[0].id;
@@ -753,6 +775,7 @@ async function sendConsignment(){
     state.consignDraft = [];
     state.consignee = '';
     state.consignNote = '';
+    state.consignMemberId = '';
     await fetchProducts();
     await fetchConsignments();
     showToast('Consignment sent to ' + consignee + '.');
@@ -788,7 +811,7 @@ async function settleConsignment(consignment){
     }
     rows.push({ it, sold, ret });
   }
-  const soldTotal = rows.reduce((s,r)=> s + r.it.price*r.sold, 0);
+  const soldTotal = rows.reduce((s,r)=> s + consignUnitPrice(r.it, consignment)*r.sold, 0);
   state.busy = true; render();
   try{
     // record the sold pieces as a real sale so revenue reports stay correct
@@ -800,7 +823,7 @@ async function settleConsignment(consignment){
       const saleId = (await saleRes.json())[0].id;
       const saleItems = rows.filter(r=>r.sold>0).map(r=>({
         sale_id: saleId, product_id: r.it.product_id, product_name: r.it.product_name,
-        price: r.it.price, qty: r.sold
+        price: consignUnitPrice(r.it, consignment), qty: r.sold
       }));
       const siRes = await fetch(`${state.supaUrl}/rest/v1/sale_items`, {
         method:'POST', headers: supaHeaders(), body: JSON.stringify(saleItems)
@@ -1172,6 +1195,12 @@ alter table members enable row level security;
 create policy "authenticated can read members" on members for select to authenticated using (true);
 create policy "staff can write members" on members for all to authenticated using (public.current_user_role() in ('admin','cashier')) with check (public.current_user_role() in ('admin','cashier'));</code>
       </div>
+
+      <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
+        <h2>Consignment member discount</h2>
+        <div class="setup-note">Gusto mo bang may discount din pag-settle ng consignment, kapag Member ang kumuha? I-run ito nang isang beses (kailangan muna gumagana ang Members at Product discounts sa itaas). Kapag tapos na, lalabas ang Member dropdown sa "Send items out", at awtomatikong ibabawas ang discount sa presyo pag na-settle na kung Member ang naka-tag doon.</div>
+        <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">alter table consignments add column if not exists member_id uuid references members(id);</code>
+      </div>
     </div>
   </div>`;
 }
@@ -1396,16 +1425,21 @@ function renderConsign(){
     const sent = items.reduce((s,i)=> s + (i.qty_sent||0), 0);
     const sold = items.reduce((s,i)=> s + (i.qty_sold||0), 0);
     const ret = items.reduce((s,i)=> s + (i.qty_returned||0), 0);
-    const soldValue = items.reduce((s,i)=> s + i.price*(i.qty_sold||0), 0);
+    const soldValue = items.reduce((s,i)=> s + consignUnitPrice(i, c)*(i.qty_sold||0), 0);
+    const linkedMember = c.member_id ? state.members.find(m=>m.id===c.member_id) : null;
 
     const itemRows = items.map(i => {
+      const disc = linkedMember ? productDiscount(i.product_id) : 0;
+      const priceLabel = disc > 0
+        ? '<span class="strike">' + money(i.price) + '</span> ' + money(consignUnitPrice(i, c))
+        : money(i.price);
       if(open){
         const st = state.settle[i.id] || {};
         const remaining = (i.qty_sent||0) - (Number(st.sold)||0) - (Number(st.returned)||0);
         return `
         <div class="cons-item">
           <div class="nm">${i.product_name}
-            <div class="sub">${i.qty_sent} sent @ ${money(i.price)} \u00B7 <span data-remain="${i.id}">${remaining}</span> not yet accounted</div>
+            <div class="sub">${i.qty_sent} sent @ ${priceLabel} \u00B7 <span data-remain="${i.id}">${remaining}</span> not yet accounted</div>
           </div>
           <div>
             <label>Sold</label>
@@ -1423,14 +1457,14 @@ function renderConsign(){
           <div class="nm">${i.product_name}
             <div class="sub">${i.qty_sent} sent \u00B7 ${i.qty_sold||0} sold \u00B7 ${i.qty_returned||0} returned${left>0 ? ' \u00B7 ' + left + ' missing' : ''}</div>
           </div>
-          <div class="mono">${money(i.price*(i.qty_sold||0))}</div>
+          <div class="mono">${money(consignUnitPrice(i, c)*(i.qty_sold||0))}</div>
         </div>`;
     }).join('');
 
     return `
     <div class="sale-row">
       <div class="head">
-        <span>${c.consignee} <span class="tag ${open?'open':'closed'}">${open?'Out':'Settled'}</span></span>
+        <span>${c.consignee}${linkedMember ? ' \u00B7 <span class="tag" style="border-color:var(--gold-dim); color:var(--gold);">Member: ' + escapeHtml(linkedMember.full_name) + '</span>' : ''} <span class="tag ${open?'open':'closed'}">${open?'Out':'Settled'}</span></span>
         <span class="amt mono">${money(soldValue)}</span>
       </div>
       <div class="items">${dt.toLocaleString()} \u00B7 ${sent} pcs sent${open ? '' : ' \u00B7 ' + sold + ' sold \u00B7 ' + ret + ' returned'}${c.note ? ' \u00B7 ' + c.note : ''}</div>
@@ -1447,6 +1481,14 @@ function renderConsign(){
         <label>Who receives it (person or branch)</label>
         <input id="cs-consignee" placeholder="e.g. Ate Mhel / Branch 2" value="${state.consignee}">
       </div>
+      ${state.consignMemberCol ? `
+      <div class="field">
+        <label>Member (discount applies when this is settled)</label>
+        <select id="cs-member">
+          <option value="">None \u2014 no discount</option>
+          ${state.members.map(m => `<option value="${m.id}" ${state.consignMemberId===m.id?'selected':''}>${escapeHtml(m.full_name)}</option>`).join('')}
+        </select>
+      </div>` : ''}
       <div class="field">
         <label>Note (optional)</label>
         <input id="cs-note" placeholder="e.g. bazaar sa Sabado" value="${state.consignNote}">
@@ -1696,6 +1738,8 @@ function render(){
   /* consignment */
   const csConsignee = document.getElementById('cs-consignee');
   if(csConsignee) csConsignee.addEventListener('input', ()=>{ state.consignee = csConsignee.value; });
+  const csMember = document.getElementById('cs-member');
+  if(csMember) csMember.addEventListener('change', ()=>{ state.consignMemberId = csMember.value; });
   const csNote = document.getElementById('cs-note');
   if(csNote) csNote.addEventListener('input', ()=>{ state.consignNote = csNote.value; });
   const csProduct = document.getElementById('cs-product');
