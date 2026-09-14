@@ -504,6 +504,7 @@ async function addProduct(name, price, stock, discount){
 
 async function deleteProduct(id){
   if(blockViewer()) return;
+  if(!isAdmin()){ showToast('Only Admin can delete products.', true); return; }
   try{
     const res = await fetch(`${state.supaUrl}/rest/v1/products?id=eq.${id}`, {
       method:'DELETE', headers: supaHeaders()
@@ -1287,6 +1288,15 @@ alter table consignments drop constraint if exists consignments_member_id_fkey;
 alter table consignments add constraint consignments_member_id_fkey
   foreign key (member_id) references members(id) on delete set null;</code>
       </div>
+
+      <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
+        <h2>Restrict deleting products to Admin only</h2>
+        <div class="setup-note">Kapag pinaandar na ito, si Cashier ay puwede pa ring magdagdag/mag-edit ng products, pero HINDI na siya makakapag-delete &mdash; Admin na lang. Ito ay para hindi na-aalala ang matanggal ang products na may naka-link nang sales o consignment history. I-run ito nang isang beses sa SQL editor.</div>
+        <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">drop policy if exists "staff can write products" on products;
+create policy "staff can insert products" on products for insert to authenticated with check (public.current_user_role() in ('admin','cashier'));
+create policy "staff can update products" on products for update to authenticated using (public.current_user_role() in ('admin','cashier')) with check (public.current_user_role() in ('admin','cashier'));
+create policy "admin can delete products" on products for delete to authenticated using (public.current_user_role() = 'admin');</code>
+      </div>
     </div>
   </div>`;
 }
@@ -1399,7 +1409,7 @@ function renderProducts(){
   const rows = state.products.map(p =>     '<div class="product-row" data-edit="' + p.id + '" style="' + (isViewer() ? 'cursor:default;' : '') + '">' +
       '<div><div class="name">' + p.name + '</div><div class="meta"><span class="stock-num' + (p.stock<=5?' stock-low':'') + '">' + p.stock + '</span> in stock' + (state.discountCol ? productDiscountLabel(p) : '') + '</div></div>' +
       '<div style="display:flex; align-items:center; gap:10px;"><div class="price mono">' + (state.discountCol && productDiscount(p.id) > 0 ? '<span class="strike">' + money(p.price) + '</span> ' + money(memberPriceOf(p)) : money(p.price)) + '</div>' +
-      (isViewer() ? '' : '<button class="icon-btn" data-del="' + p.id + '" title="Delete">\u2715</button>') + '</div></div>'
+      (isViewer() ? '' : (isAdmin() ? '<button class="icon-btn" data-del="' + p.id + '" title="Delete">\u2715</button>' : '')) + '</div></div>'
   ).join('') || '<div class="empty">No products yet.</div>';
 
   const ed = state.editing;
