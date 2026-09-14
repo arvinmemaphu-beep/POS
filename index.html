@@ -1111,108 +1111,41 @@ function userRowsHtml(){
 function renderAdminSettings(){
   return `
   <div class="panel" style="max-width:520px;">
-    <h2>Connect to Supabase</h2>
-    <div class="field">
-      <label>Project URL</label>
-      <input id="in-url" placeholder="https://xxxx.supabase.co" value="${state.supaUrl}">
+    <h2>Manage users</h2>
+    <div class="setup-note">I-run ito nang isang beses (kailangan muna gumagana ang User access roles sa ibaba) para makapag-add ka ng user dito mismo sa app, at para makita ang listahan ng mga user:</div>
+    <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">alter table profiles add column if not exists email text;
+
+drop policy if exists "admins can read all profiles" on profiles;
+create policy "admins can read all profiles" on profiles for select to authenticated using (public.current_user_role() = 'admin');
+
+drop policy if exists "admins can add profiles" on profiles;
+create policy "admins can add profiles" on profiles for insert to authenticated with check (public.current_user_role() = 'admin');
+
+drop policy if exists "admins can update profiles" on profiles;
+create policy "admins can update profiles" on profiles for update to authenticated using (public.current_user_role() = 'admin') with check (public.current_user_role() = 'admin');
+
+drop policy if exists "admins can remove profiles" on profiles;
+create policy "admins can remove profiles" on profiles for delete to authenticated using (public.current_user_role() = 'admin');</code>
+    <div class="setup-note" style="margin-top:10px;">Tip: kung naka-on ang <strong>Confirm email</strong> sa Supabase (Authentication &rarr; Providers &rarr; Email), kailangan munang i-confirm ng bagong user ang email niya bago siya makapag-login. Pwede mo itong i-off doon kung gusto mong instant makapag-login agad ang mga cashier/regular na idadagdag mo.</div>
+
+    <div class="row2" style="margin-top:14px;">
+      <div class="field"><label>Full name</label><input id="nu-name" placeholder="e.g. Maria Santos"></div>
+      <div class="field"><label>Role</label>
+        <select id="nu-role" class="field-input">
+          <option value="cashier">Cashier</option>
+          <option value="viewer">Regular (view only)</option>
+          <option value="admin">Admin</option>
+        </select>
+      </div>
     </div>
-    <div class="field">
-      <label>Anon public key</label>
-      <input id="in-key" placeholder="eyJhbGciOi..." value="${state.supaKey}">
+    <div class="field"><label>Email</label><input id="nu-email" type="email" placeholder="user@example.com"></div>
+    <div class="field"><label>Password</label><input id="nu-password" type="password" placeholder="At least 6 characters"></div>
+    <button class="primary" id="btn-add-user" style="width:auto; padding:9px 18px;" ${state.userBusy ? 'disabled' : ''}>${state.userBusy ? 'Adding...' : 'Add user'}</button>
+
+    <div style="margin-top:18px;">
+      <h2 style="margin-bottom:10px;">Current users</h2>
+      <div id="user-list" class="product-list">${userRowsHtml()}</div>
     </div>
-    <button class="primary" id="btn-connect" style="width:auto; padding:9px 18px;">Connect</button>
-    <div class="status-row">
-      <span class="status-dot ${state.connected?'status-ok':'status-bad'}"></span>
-      ${state.connected ? 'Connected' : 'Not connected'}
-    </div>
-    <div class="setup-note">
-      Run this once in your Supabase project's SQL editor to create the tables:
-      <br><br>
-      <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:6px;">create table products (
-  id uuid primary key default gen_random_uuid(),
-  name text not null,
-  price numeric not null default 0,
-  stock integer not null default 0,
-  created_at timestamptz default now()
-);
-
-create table sales (
-  id uuid primary key default gen_random_uuid(),
-  total numeric not null,
-  created_at timestamptz default now()
-);
-
-create table sale_items (
-  id uuid primary key default gen_random_uuid(),
-  sale_id uuid references sales(id) on delete cascade,
-  product_id uuid references products(id),
-  product_name text not null,
-  price numeric not null,
-  qty integer not null,
-  created_at timestamptz default now()
-);
-
-alter table products enable row level security;
-alter table sales enable row level security;
-alter table sale_items enable row level security;
-create policy "authenticated full access" on products for all to authenticated using (true) with check (true);
-create policy "authenticated full access" on sales for all to authenticated using (true) with check (true);
-create policy "authenticated full access" on sale_items for all to authenticated using (true) with check (true);</code>
-      <br>
-      <strong>Consignment tables</strong> &mdash; run this too so the Consign tab works:
-      <br><br>
-      <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:6px;">create table consignments (
-  id uuid primary key default gen_random_uuid(),
-  consignee text not null,
-  note text,
-  status text not null default 'open',
-  settled_at timestamptz,
-  created_at timestamptz default now()
-);
-
-create table consignment_items (
-  id uuid primary key default gen_random_uuid(),
-  consignment_id uuid references consignments(id) on delete cascade,
-  product_id uuid references products(id),
-  product_name text not null,
-  price numeric not null,
-  qty_sent integer not null,
-  qty_sold integer not null default 0,
-  qty_returned integer not null default 0,
-  created_at timestamptz default now()
-);
-
-alter table consignments enable row level security;
-alter table consignment_items enable row level security;
-create policy "authenticated full access" on consignments for all to authenticated using (true) with check (true);
-create policy "authenticated full access" on consignment_items for all to authenticated using (true) with check (true);</code>
-      <br>
-      Get your URL and anon key from Project Settings &rarr; API. The policies above require a signed-in Supabase Auth user. Run the User access roles SQL below, then sign in with an account that has an admin or cashier profile.
-      <br><br>
-      <strong>Already have the old tables?</strong> Sales are now split into <code>sales</code> (per transaction) and <code>sale_items</code> (one row per product sold) for easier reporting. Run this in the SQL editor to switch over &mdash; note this clears existing sales history:
-      <br><br>
-      <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:6px;">drop table if exists sales cascade;
-
-create table sales (
-  id uuid primary key default gen_random_uuid(),
-  total numeric not null,
-  created_at timestamptz default now()
-);
-
-create table sale_items (
-  id uuid primary key default gen_random_uuid(),
-  sale_id uuid references sales(id) on delete cascade,
-  product_id uuid references products(id),
-  product_name text not null,
-  price numeric not null,
-  qty integer not null,
-  created_at timestamptz default now()
-);
-
-alter table sales enable row level security;
-alter table sale_items enable row level security;
-create policy "authenticated full access" on sales for all to authenticated using (true) with check (true);
-create policy "authenticated full access" on sale_items for all to authenticated using (true) with check (true);</code>
 
       <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
         <h2>User access roles</h2>
@@ -1286,44 +1219,6 @@ drop policy if exists "staff can write consignment_items" on consignment_items;
 create policy "authenticated can read consignment_items" on consignment_items for select to authenticated using (true);
 create policy "staff can write consignment_items" on consignment_items for all to authenticated using (public.current_user_role() in ('admin','cashier')) with check (public.current_user_role() in ('admin','cashier'));</code>
         <div class="setup-note">After running this SQL, sign out and sign in again. The Settings tab is hidden and blocked for Cashier and Regular accounts.</div>
-      </div>
-
-      <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
-        <h2>Manage users</h2>
-        <div class="setup-note">I-run ito nang isang beses (kailangan muna gumagana ang User access roles sa itaas) para makapag-add ka ng user dito mismo sa app, at para makita ang listahan ng mga user:</div>
-        <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">alter table profiles add column if not exists email text;
-
-drop policy if exists "admins can read all profiles" on profiles;
-create policy "admins can read all profiles" on profiles for select to authenticated using (public.current_user_role() = 'admin');
-
-drop policy if exists "admins can add profiles" on profiles;
-create policy "admins can add profiles" on profiles for insert to authenticated with check (public.current_user_role() = 'admin');
-
-drop policy if exists "admins can update profiles" on profiles;
-create policy "admins can update profiles" on profiles for update to authenticated using (public.current_user_role() = 'admin') with check (public.current_user_role() = 'admin');
-
-drop policy if exists "admins can remove profiles" on profiles;
-create policy "admins can remove profiles" on profiles for delete to authenticated using (public.current_user_role() = 'admin');</code>
-        <div class="setup-note" style="margin-top:10px;">Tip: kung naka-on ang <strong>Confirm email</strong> sa Supabase (Authentication &rarr; Providers &rarr; Email), kailangan munang i-confirm ng bagong user ang email niya bago siya makapag-login. Pwede mo itong i-off doon kung gusto mong instant makapag-login agad ang mga cashier/regular na idadagdag mo.</div>
-
-        <div class="row2" style="margin-top:14px;">
-          <div class="field"><label>Full name</label><input id="nu-name" placeholder="e.g. Maria Santos"></div>
-          <div class="field"><label>Role</label>
-            <select id="nu-role" class="field-input">
-              <option value="cashier">Cashier</option>
-              <option value="viewer">Regular (view only)</option>
-              <option value="admin">Admin</option>
-            </select>
-          </div>
-        </div>
-        <div class="field"><label>Email</label><input id="nu-email" type="email" placeholder="user@example.com"></div>
-        <div class="field"><label>Password</label><input id="nu-password" type="password" placeholder="At least 6 characters"></div>
-        <button class="primary" id="btn-add-user" style="width:auto; padding:9px 18px;" ${state.userBusy ? 'disabled' : ''}>${state.userBusy ? 'Adding...' : 'Add user'}</button>
-
-        <div style="margin-top:18px;">
-          <h2 style="margin-bottom:10px;">Current users</h2>
-          <div id="user-list" class="product-list">${userRowsHtml()}</div>
-        </div>
       </div>
 
       <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
