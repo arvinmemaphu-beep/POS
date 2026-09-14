@@ -229,6 +229,7 @@ const state = {
   appUsers: [],           // list of profiles rows, admin-only, for the Manage users section in Settings
   userBusy: false,        // true while adding a new user
   editingSaleItem: null,  // {id, product_name} sale_items row being name-corrected, Admin-only
+  editingConsignItem: null, // {id, product_name} consignment_items row being name-corrected, Admin-only
 };
 
 function el(html){
@@ -482,6 +483,26 @@ async function updateSaleItemName(id, name){
     showToast('Sale item name corrected.');
   }catch(e){
     showToast('Could not update sale item: ' + e.message, true);
+  }
+}
+
+// Same fix as updateSaleItemName, but for a consignment_items row (product_name is
+// snapshotted when the consignment is sent out — see sendConsignment above).
+async function updateConsignItemName(id, name){
+  if(!isAdmin()){ showToast('Only Admin can correct a consignment item name.', true); return; }
+  name = (name || '').trim();
+  if(!name){ showToast('Enter a product name.', true); return; }
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/consignment_items?id=eq.${id}`, {
+      method:'PATCH', headers: supaHeaders(),
+      body: JSON.stringify({ product_name: name })
+    });
+    if(!res.ok) throw new Error('Update failed');
+    state.editingConsignItem = null;
+    await fetchConsignments();
+    showToast('Consignment item name corrected.');
+  }catch(e){
+    showToast('Could not update consignment item: ' + e.message, true);
   }
 }
 
@@ -1543,12 +1564,24 @@ function renderConsign(){
       const priceLabel = disc > 0
         ? '<span class="strike">' + money(i.price) + '</span> ' + money(consignUnitPrice(i, c))
         : money(i.price);
+      const editingThis = isAdmin() && state.editingConsignItem && state.editingConsignItem.id === i.id;
+      if(editingThis){
+        return `
+        <div class="cons-item">
+          <div class="field" style="flex:1; margin:0;"><label>Product name</label><input id="eci-name" value="${escapeHtml(state.editingConsignItem.product_name)}"></div>
+          <div style="display:flex; gap:8px;">
+            <button class="primary" id="btn-save-consign-item">Save</button>
+            <button class="ghost" id="btn-cancel-consign-item">Cancel</button>
+          </div>
+        </div>`;
+      }
+      const nameLabel = i.product_name + (isAdmin() ? ` <button class="icon-btn" data-edit-consign-item="${i.id}" title="Correct product name">\u270E</button>` : '');
       if(open){
         const st = state.settle[i.id] || {};
         const remaining = (i.qty_sent||0) - (Number(st.sold)||0) - (Number(st.returned)||0);
         return `
         <div class="cons-item">
-          <div class="nm">${i.product_name}
+          <div class="nm">${nameLabel}
             <div class="sub">${i.qty_sent} sent @ ${priceLabel} \u00B7 <span data-remain="${i.id}">${remaining}</span> not yet accounted</div>
           </div>
           <div>
@@ -1564,7 +1597,7 @@ function renderConsign(){
       const left = (i.qty_sent||0) - (i.qty_sold||0) - (i.qty_returned||0);
       return `
         <div class="cons-item">
-          <div class="nm">${i.product_name}
+          <div class="nm">${nameLabel}
             <div class="sub">${i.qty_sent} sent \u00B7 ${i.qty_sold||0} sold \u00B7 ${i.qty_returned||0} returned${left>0 ? ' \u00B7 ' + left + ' missing' : ''}</div>
           </div>
           <div class="mono">${money(consignUnitPrice(i, c)*(i.qty_sold||0))}</div>
@@ -1929,6 +1962,27 @@ function render(){
       if(c) settleConsignment(c);
     });
   });
+
+  /* consignment item name correction (Admin-only) */
+  app.querySelectorAll('[data-edit-consign-item]').forEach(b=>{
+    b.addEventListener('click', ()=>{
+      if(!isAdmin()) return;
+      let found = null;
+      for(const c of state.consignments){
+        found = (c.consignment_items || []).find(x=>x.id===b.dataset.editConsignItem);
+        if(found) break;
+      }
+      if(found){ state.editingConsignItem = { id: found.id, product_name: found.product_name }; render(); }
+    });
+  });
+  const saveConsignItemBtn = document.getElementById('btn-save-consign-item');
+  if(saveConsignItemBtn){
+    saveConsignItemBtn.addEventListener('click', ()=>{
+      updateConsignItemName(state.editingConsignItem.id, document.getElementById('eci-name').value);
+    });
+  }
+  const cancelConsignItemBtn = document.getElementById('btn-cancel-consign-item');
+  if(cancelConsignItemBtn) cancelConsignItemBtn.addEventListener('click', ()=>{ state.editingConsignItem = null; render(); });
 }
 
 async function init(){
