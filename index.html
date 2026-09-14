@@ -228,6 +228,7 @@ const state = {
   consignMemberCol: false, // true once the consignments table has a member_id column (see Settings SQL)
   appUsers: [],           // list of profiles rows, admin-only, for the Manage users section in Settings
   userBusy: false,        // true while adding a new user
+  editingSaleItem: null,  // {id, product_name} sale_items row being name-corrected, Admin-only
 };
 
 function el(html){
@@ -461,6 +462,27 @@ async function fetchSaleItems(){
     showToast('Could not load sale items: ' + e.message, true);
   }
   state.loading = false; render();
+}
+
+// Corrects the product name saved on a past sale item. Admin-only: this fixes a
+// typo baked in at checkout time, it does not touch the live Products table.
+async function updateSaleItemName(id, name){
+  if(!isAdmin()){ showToast('Only Admin can correct a sale item name.', true); return; }
+  name = (name || '').trim();
+  if(!name){ showToast('Enter a product name.', true); return; }
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/sale_items?id=eq.${id}`, {
+      method:'PATCH', headers: supaHeaders(),
+      body: JSON.stringify({ product_name: name })
+    });
+    if(!res.ok) throw new Error('Update failed');
+    state.editingSaleItem = null;
+    await fetchSaleItems();
+    await fetchSales();
+    showToast('Sale item name corrected.');
+  }catch(e){
+    showToast('Could not update sale item: ' + e.message, true);
+  }
 }
 
 async function addProduct(name, price, stock, discount){
@@ -1445,15 +1467,29 @@ function renderSaleItems(){
       </div>
     `).join('') || `<div class="empty">No sale items yet.</div>`;
 
+  const editing = state.editingSaleItem;
   const listRows = state.saleItems.map(it => {
     const d = it.sales && it.sales.created_at ? new Date(it.sales.created_at) : null;
+    if(isAdmin() && editing && editing.id === it.id){
+      return `
+      <div class="sale-row">
+        <div class="field"><label>Product name</label><input id="esi-name" value="${escapeHtml(editing.product_name)}"></div>
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <button class="primary" id="btn-save-sale-item" style="flex:1;">Save</button>
+          <button class="ghost" id="btn-cancel-sale-item" style="flex:1;">Cancel</button>
+        </div>
+      </div>`;
+    }
     return `
     <div class="sale-row">
       <div class="head">
         <span>${d ? d.toLocaleString() : ''}</span>
         <span class="amt mono">${money(it.price * it.qty)}</span>
       </div>
-      <div class="items">${it.qty}\u00D7 ${it.product_name} @ ${money(it.price)}</div>
+      <div class="items" style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+        <span>${it.qty}\u00D7 ${it.product_name} @ ${money(it.price)}</span>
+        ${isAdmin() ? `<button class="icon-btn" data-edit-sale-item="${it.id}" title="Correct product name">\u270E</button>` : ''}
+      </div>
     </div>`;
   }).join('') || `<div class="empty">No sale items yet.</div>`;
 
@@ -1464,7 +1500,7 @@ function renderSaleItems(){
       <div class="product-list">${summaryRows}</div>
     </div>
     <div class="panel">
-      <h2>All sale items</h2>
+      <h2>All sale items${isAdmin() ? ' <span style="font-weight:400; color:var(--ink-dim);">\u2014 tap \u270E to correct a name</span>' : ''}</h2>
       <div>${listRows}</div>
     </div>
   </div>`;
@@ -1775,6 +1811,23 @@ function render(){
       restockProduct(state.editing.id, document.getElementById('rs-qty').value);
     });
   }
+
+  /* sale item name correction (Admin-only) */
+  app.querySelectorAll('[data-edit-sale-item]').forEach(b=>{
+    b.addEventListener('click', ()=>{
+      if(!isAdmin()) return;
+      const it = state.saleItems.find(x=>x.id===b.dataset.editSaleItem);
+      if(it){ state.editingSaleItem = { id: it.id, product_name: it.product_name }; render(); }
+    });
+  });
+  const saveSaleItemBtn = document.getElementById('btn-save-sale-item');
+  if(saveSaleItemBtn){
+    saveSaleItemBtn.addEventListener('click', ()=>{
+      updateSaleItemName(state.editingSaleItem.id, document.getElementById('esi-name').value);
+    });
+  }
+  const cancelSaleItemBtn = document.getElementById('btn-cancel-sale-item');
+  if(cancelSaleItemBtn) cancelSaleItemBtn.addEventListener('click', ()=>{ state.editingSaleItem = null; render(); });
 
   /* members */
   wireMemberRows();
