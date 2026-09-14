@@ -1375,7 +1375,7 @@ function productDiscountLabel(p){
 
 function renderProducts(){
   const rows = state.products.map(p =>     '<div class="product-row" data-edit="' + p.id + '" style="' + (isViewer() ? 'cursor:default;' : '') + '">' +
-      '<div><div class="name">' + p.name + '</div><div class="meta">' + p.stock + ' in stock' + (state.discountCol ? productDiscountLabel(p) : '') + '</div></div>' +
+      '<div><div class="name">' + p.name + '</div><div class="meta"><span class="stock-num' + (p.stock<=5?' stock-low':'') + '">' + p.stock + '</span> in stock' + (state.discountCol ? productDiscountLabel(p) : '') + '</div></div>' +
       '<div style="display:flex; align-items:center; gap:10px;"><div class="price mono">' + (state.discountCol && productDiscount(p.id) > 0 ? '<span class="strike">' + money(p.price) + '</span> ' + money(memberPriceOf(p)) : money(p.price)) + '</div>' +
       (isViewer() ? '' : '<button class="icon-btn" data-del="' + p.id + '" title="Delete">\u2715</button>') + '</div></div>'
   ).join('') || '<div class="empty">No products yet.</div>';
