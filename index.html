@@ -1284,7 +1284,7 @@ function renderSetup(){
 function renderLogin(){
   return '<div class="auth-shell"><div class="panel auth-card">' +
     '<h2>Sign in to CCFACO POS</h2>' +
-    '<div class="setup-note">Use your Supabase Auth email and password. Your access level comes from your profile role.</div>' +
+    '<div class="setup-note">Gamitin ang email at Password na ibinigay ng Administrator.</div>' +
     '<div class="field" style="margin-top:16px;"><label>Email</label><input id="in-email" type="email" autocomplete="username" placeholder="you@example.com" value="' + escapeHtml(state.loginEmail) + '"></div>' +
     '<div class="field"><label>Password</label><input id="in-password" type="password" autocomplete="current-password" placeholder="Your password"></div>' +
     '<button class="primary" id="btn-login">' + (state.authLoading ? 'Signing in...' : 'Sign in') + '</button>' +
@@ -1632,7 +1632,7 @@ function render(){
     '<div class="user-bar"><span class="role-badge">' + escapeHtml(roleLabel()) + '</span><span>' + escapeHtml(state.user && state.user.email ? state.user.email : 'Signed in') + '</span><button class="ghost" id="btn-logout" style="padding:5px 9px;">Sign out</button></div>' : '';
 
   app.innerHTML =
-    '<header class="top"><div><h1 class="serif">CCFACO POS</h1><div class="sub">Design by: Arvin B.</div></div>' +
+    '<header class="top"><div><h1 class="serif">CCFACO POS</h1><div class="sub">Designed by: Arvin B.</div></div>' +
     '<div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px;">' + nav + userBar + '</div></header>' +
     body +
     (state.toast ? '<div class="toast ' + (state.toast.isErr ? 'err' : '') + '">' + escapeHtml(state.toast.msg) + '</div>' : '');
