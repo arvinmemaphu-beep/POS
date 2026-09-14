@@ -226,6 +226,8 @@ const state = {
   saleMemberId: '',      // id of the member picked for THIS sale in the Sell tab; '' = walk-in, no discount
   consignMemberId: '',   // member picked when sending a consignment out; discount applies to it at settle time
   consignMemberCol: false, // true once the consignments table has a member_id column (see Settings SQL)
+  appUsers: [],           // list of profiles rows, admin-only, for the Manage users section in Settings
+  userBusy: false,        // true while adding a new user
 };
 
 function el(html){
@@ -419,6 +421,7 @@ function switchTab(tab){
   if(tab === 'items') fetchSaleItems();
   if(tab === 'consign') fetchConsignments();
   if(tab === 'members') fetchMembers();
+  if(tab === 'settings') fetchAppUsers();
 }
 
 async function fetchProducts(){
@@ -1009,6 +1012,102 @@ function renderMembers(){
     '<div class="product-list" id="member-list">' + memberRowsHtml() + '</div></div></div>';
 }
 
+/* ---------- Users (admin-only) ---------- */
+function roleDisplay(role){ return role === 'admin' ? 'Admin' : (role === 'viewer' ? 'Regular' : 'Cashier'); }
+
+async function fetchAppUsers(){
+  if(!state.connected || !isAdmin()) return;
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/profiles?select=*&order=full_name.asc`, { headers: supaHeaders() });
+    if(!res.ok) throw new Error('Could not load users. Run the Manage users SQL in Settings first.');
+    state.appUsers = await res.json();
+  }catch(e){
+    showToast('Could not load users: ' + e.message, true);
+  }
+  render();
+}
+
+async function createUser(email, password, fullName, role){
+  if(!isAdmin()) return false;
+  if(!email || !password){ showToast('Enter an email and password.', true); return false; }
+  if(password.length < 6){ showToast('Password should be at least 6 characters.', true); return false; }
+  state.userBusy = true; render();
+  try{
+    const signupRes = await fetch(`${state.supaUrl}/auth/v1/signup`, {
+      method:'POST',
+      headers: { 'apikey': state.supaKey, 'Content-Type':'application/json' },
+      body: JSON.stringify({ email, password })
+    });
+    const payload = await signupRes.json().catch(()=>({}));
+    if(!signupRes.ok) throw new Error(payload.error_description || payload.msg || payload.error || 'Could not create the account.');
+    const newUserId = (payload.user && payload.user.id) || payload.id;
+    if(!newUserId) throw new Error('Account created, but no user id came back. Check Supabase Authentication to confirm.');
+    const profRes = await fetch(`${state.supaUrl}/rest/v1/profiles`, {
+      method:'POST', headers: supaHeaders(),
+      body: JSON.stringify([{ user_id: newUserId, full_name: fullName || null, role, email }])
+    });
+    if(!profRes.ok){
+      const errBody = await profRes.json().catch(()=>({}));
+      throw new Error(errBody.message || errBody.hint || 'Account created, but could not save the role. Add it in the profiles table manually.');
+    }
+    showToast('User added as ' + roleDisplay(role) + '.');
+    await fetchAppUsers();
+    return true;
+  }catch(e){
+    showToast('Could not add user: ' + e.message, true);
+    return false;
+  }finally{
+    state.userBusy = false; render();
+  }
+}
+
+async function updateUserRole(userId, role){
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/profiles?user_id=eq.${userId}`, {
+      method:'PATCH', headers: supaHeaders(),
+      body: JSON.stringify({ role })
+    });
+    if(!res.ok) throw new Error('Update failed.');
+    await fetchAppUsers();
+    showToast('Role updated.');
+  }catch(e){
+    showToast('Could not update role: ' + e.message, true);
+  }
+}
+
+async function removeUserAccess(userId){
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/profiles?user_id=eq.${userId}`, {
+      method:'DELETE', headers: supaHeaders()
+    });
+    if(!res.ok) throw new Error('Failed.');
+    state.appUsers = state.appUsers.filter(u=>u.user_id!==userId);
+    render();
+    showToast('Access removed.');
+  }catch(e){
+    showToast('Could not remove access: ' + e.message, true);
+  }
+}
+
+function userRowHtml(u){
+  const isMe = state.user && state.user.id === u.user_id;
+  return '<div class="product-row" style="cursor:default;">' +
+    '<div><div class="name">' + escapeHtml(u.full_name || u.email || 'Unnamed') + (isMe ? ' <span style="color:var(--ink-dim); font-size:12px;">(you)</span>' : '') + '</div>' +
+    '<div class="meta">' + escapeHtml(u.email || '') + '</div></div>' +
+    '<div style="display:flex; align-items:center; gap:8px;">' +
+    '<select class="field-input" data-role-user="' + u.user_id + '" style="width:auto; padding:5px 8px; font-size:13px;">' +
+      '<option value="admin"' + (u.role==='admin'?' selected':'') + '>Admin</option>' +
+      '<option value="cashier"' + (u.role==='cashier'?' selected':'') + '>Cashier</option>' +
+      '<option value="viewer"' + (u.role==='viewer'?' selected':'') + '>Regular</option>' +
+    '</select>' +
+    (isMe ? '' : '<button class="icon-btn" data-remove-user="' + u.user_id + '" title="Remove access">\u2715</button>') +
+    '</div></div>';
+}
+
+function userRowsHtml(){
+  return (state.appUsers||[]).map(userRowHtml).join('') || '<div class="empty">No users yet. Add one below.</div>';
+}
+
 function renderAdminSettings(){
   return `
   <div class="panel" style="max-width:520px;">
@@ -1187,6 +1286,44 @@ drop policy if exists "staff can write consignment_items" on consignment_items;
 create policy "authenticated can read consignment_items" on consignment_items for select to authenticated using (true);
 create policy "staff can write consignment_items" on consignment_items for all to authenticated using (public.current_user_role() in ('admin','cashier')) with check (public.current_user_role() in ('admin','cashier'));</code>
         <div class="setup-note">After running this SQL, sign out and sign in again. The Settings tab is hidden and blocked for Cashier and Regular accounts.</div>
+      </div>
+
+      <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
+        <h2>Manage users</h2>
+        <div class="setup-note">I-run ito nang isang beses (kailangan muna gumagana ang User access roles sa itaas) para makapag-add ka ng user dito mismo sa app, at para makita ang listahan ng mga user:</div>
+        <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">alter table profiles add column if not exists email text;
+
+drop policy if exists "admins can read all profiles" on profiles;
+create policy "admins can read all profiles" on profiles for select to authenticated using (public.current_user_role() = 'admin');
+
+drop policy if exists "admins can add profiles" on profiles;
+create policy "admins can add profiles" on profiles for insert to authenticated with check (public.current_user_role() = 'admin');
+
+drop policy if exists "admins can update profiles" on profiles;
+create policy "admins can update profiles" on profiles for update to authenticated using (public.current_user_role() = 'admin') with check (public.current_user_role() = 'admin');
+
+drop policy if exists "admins can remove profiles" on profiles;
+create policy "admins can remove profiles" on profiles for delete to authenticated using (public.current_user_role() = 'admin');</code>
+        <div class="setup-note" style="margin-top:10px;">Tip: kung naka-on ang <strong>Confirm email</strong> sa Supabase (Authentication &rarr; Providers &rarr; Email), kailangan munang i-confirm ng bagong user ang email niya bago siya makapag-login. Pwede mo itong i-off doon kung gusto mong instant makapag-login agad ang mga cashier/regular na idadagdag mo.</div>
+
+        <div class="row2" style="margin-top:14px;">
+          <div class="field"><label>Full name</label><input id="nu-name" placeholder="e.g. Maria Santos"></div>
+          <div class="field"><label>Role</label>
+            <select id="nu-role" class="field-input">
+              <option value="cashier">Cashier</option>
+              <option value="viewer">Regular (view only)</option>
+              <option value="admin">Admin</option>
+            </select>
+          </div>
+        </div>
+        <div class="field"><label>Email</label><input id="nu-email" type="email" placeholder="user@example.com"></div>
+        <div class="field"><label>Password</label><input id="nu-password" type="password" placeholder="At least 6 characters"></div>
+        <button class="primary" id="btn-add-user" style="width:auto; padding:9px 18px;" ${state.userBusy ? 'disabled' : ''}>${state.userBusy ? 'Adding...' : 'Add user'}</button>
+
+        <div style="margin-top:18px;">
+          <h2 style="margin-bottom:10px;">Current users</h2>
+          <div id="user-list" class="product-list">${userRowsHtml()}</div>
+        </div>
       </div>
 
       <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
@@ -1771,6 +1908,24 @@ function render(){
   }
   const cancelMemberBtn = document.getElementById('btn-cancel-member');
   if(cancelMemberBtn) cancelMemberBtn.addEventListener('click', ()=>{ state.editingMember = null; render(); });
+
+  /* users (admin-only) */
+  const addUserBtn = document.getElementById('btn-add-user');
+  if(addUserBtn){
+    addUserBtn.addEventListener('click', async ()=>{
+      const email = document.getElementById('nu-email').value.trim();
+      const password = document.getElementById('nu-password').value;
+      const name = document.getElementById('nu-name').value.trim();
+      const role = document.getElementById('nu-role').value;
+      await createUser(email, password, name, role);
+    });
+  }
+  app.querySelectorAll('[data-role-user]').forEach(sel=>{
+    sel.addEventListener('change', ()=> updateUserRole(sel.dataset.roleUser, sel.value));
+  });
+  app.querySelectorAll('[data-remove-user]').forEach(b=>{
+    b.addEventListener('click', ()=> removeUserAccess(b.dataset.removeUser));
+  });
 
   /* consignment */
   const csConsignee = document.getElementById('cs-consignee');
