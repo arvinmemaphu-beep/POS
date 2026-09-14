@@ -188,6 +188,7 @@
 <div class="app" id="app"></div>
 
 <script src="config.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
 const supabaseConfig = window.SUPABASE_CONFIG || {};
 const state = {
@@ -504,6 +505,92 @@ async function updateConsignItemName(id, name){
   }catch(e){
     showToast('Could not update consignment item: ' + e.message, true);
   }
+}
+
+// Pulls the FULL sales history (not just the 50 shown on screen) and builds a
+// downloadable .xlsx with a per-sale summary sheet and a per-product detail sheet.
+// Pulls the FULL history from Supabase (not just what's shown on screen) and builds ONE
+// downloadable .xlsx with everything: Sales, Sale Items, Consignments, and Consignment Items.
+function sheetOrEmpty(rows, emptyNote){
+  return XLSX.utils.json_to_sheet(rows.length ? rows : [{ Note: emptyNote }]);
+}
+async function exportHistoryToExcel(){
+  if(!state.connected) return;
+  const btn = document.getElementById('btn-export-excel');
+  if(btn){ btn.disabled = true; btn.textContent = 'Exporting...'; }
+  try{
+    const [salesRes, consignRes] = await Promise.all([
+      fetch(`${state.supaUrl}/rest/v1/sales?select=*,sale_items(product_name,price,qty)&order=created_at.desc`, { headers: supaHeaders() }),
+      fetch(`${state.supaUrl}/rest/v1/consignments?select=*,consignment_items(*)&order=created_at.desc`, { headers: supaHeaders() })
+    ]);
+    if(!salesRes.ok) throw new Error('Failed to load sales');
+    if(!consignRes.ok) throw new Error('Failed to load consignments');
+    const sales = await salesRes.json();
+    const consignments = await consignRes.json();
+    if(sales.length === 0 && consignments.length === 0){ showToast('Wala pang data na i-eexport.', true); return; }
+
+    const salesSummary = sales.map(s => {
+      const d = new Date(s.created_at);
+      const items = (s.sale_items || []).map(i => `${i.qty}x ${i.product_name}`).join(', ');
+      return { Date: d.toLocaleDateString(), Time: d.toLocaleTimeString(), Items: items, Total: Number(s.total) };
+    });
+
+    const saleItemRows = [];
+    sales.forEach(s => {
+      const d = new Date(s.created_at);
+      (s.sale_items || []).forEach(i => {
+        saleItemRows.push({
+          Date: d.toLocaleDateString(), Time: d.toLocaleTimeString(),
+          Product: i.product_name, Qty: i.qty,
+          'Unit Price': Number(i.price), Subtotal: Number(i.price) * Number(i.qty)
+        });
+      });
+    });
+
+    const consignSummary = consignments.map(c => {
+      const d = new Date(c.created_at);
+      const items = c.consignment_items || [];
+      const member = c.member_id ? state.members.find(m=>m.id===c.member_id) : null;
+      const sent = items.reduce((s,i)=> s + (i.qty_sent||0), 0);
+      const sold = items.reduce((s,i)=> s + (i.qty_sold||0), 0);
+      const returned = items.reduce((s,i)=> s + (i.qty_returned||0), 0);
+      const soldValue = items.reduce((s,i)=> s + consignUnitPrice(i, c)*(i.qty_sold||0), 0);
+      return {
+        'Date Sent': d.toLocaleDateString(), Time: d.toLocaleTimeString(),
+        Consignee: c.consignee, Member: member ? member.full_name : '',
+        Status: c.status === 'closed' ? 'Settled' : 'Out',
+        'Qty Sent': sent, 'Qty Sold': sold, 'Qty Returned': returned,
+        'Sold Value': soldValue, Note: c.note || ''
+      };
+    });
+
+    const consignItemRows = [];
+    consignments.forEach(c => {
+      const d = new Date(c.created_at);
+      const member = c.member_id ? state.members.find(m=>m.id===c.member_id) : null;
+      (c.consignment_items || []).forEach(i => {
+        consignItemRows.push({
+          'Date Sent': d.toLocaleDateString(), Time: d.toLocaleTimeString(),
+          Consignee: c.consignee, Member: member ? member.full_name : '',
+          Product: i.product_name, 'Qty Sent': i.qty_sent, Price: Number(i.price),
+          'Qty Sold': i.qty_sold||0, 'Qty Returned': i.qty_returned||0,
+          'Sold Value': consignUnitPrice(i, c) * (i.qty_sold||0),
+          Status: c.status === 'closed' ? 'Settled' : 'Out'
+        });
+      });
+    });
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, sheetOrEmpty(salesSummary, 'No sales yet'), 'Sales Summary');
+    XLSX.utils.book_append_sheet(wb, sheetOrEmpty(saleItemRows, 'No sale items yet'), 'Sale Items');
+    XLSX.utils.book_append_sheet(wb, sheetOrEmpty(consignSummary, 'No consignments yet'), 'Consignments');
+    XLSX.utils.book_append_sheet(wb, sheetOrEmpty(consignItemRows, 'No consignment items yet'), 'Consignment Items');
+    XLSX.writeFile(wb, `CCFACO-Reports-${new Date().toISOString().slice(0,10)}.xlsx`);
+    showToast('Excel report downloaded.');
+  }catch(e){
+    showToast('Could not export: ' + e.message, true);
+  }
+  if(btn){ btn.disabled = false; btn.textContent = 'Export to Excel'; }
 }
 
 async function addProduct(name, price, stock, discount){
@@ -1475,7 +1562,14 @@ function renderHistory(){
     </div>`;
   }).join('') || `<div class="empty">No sales yet.</div>`;
 
-  return `<div class="panel">${rows}</div>`;
+  return `<div class="panel">
+    <h2 style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+      <span>Sales History</span>
+      <button class="ghost" id="btn-export-excel" style="padding:7px 12px; white-space:nowrap;">Export to Excel</button>
+    </h2>
+    <div class="setup-note" style="margin-bottom:10px;">Ini-export ang LAHAT ng report sa isang Excel file (.xlsx) na may 4 sheets: Sales Summary, Sale Items, Consignments, at Consignment Items \u2014 buong history, hindi lang itong nakikita dito.</div>
+    ${rows}
+  </div>`;
 }
 
 function renderSaleItems(){
@@ -1983,6 +2077,9 @@ function render(){
   }
   const cancelConsignItemBtn = document.getElementById('btn-cancel-consign-item');
   if(cancelConsignItemBtn) cancelConsignItemBtn.addEventListener('click', ()=>{ state.editingConsignItem = null; render(); });
+
+  const exportExcelBtn = document.getElementById('btn-export-excel');
+  if(exportExcelBtn) exportExcelBtn.addEventListener('click', exportHistoryToExcel);
 }
 
 async function init(){
