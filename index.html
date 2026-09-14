@@ -231,6 +231,9 @@ const state = {
   userBusy: false,        // true while adding a new user
   editingSaleItem: null,  // {id, product_name} sale_items row being name-corrected, Admin-only
   editingConsignItem: null, // {id, product_name} consignment_items row being name-corrected, Admin-only
+  ledgerReady: false,     // true once the ledger_entries table exists (see Settings SQL)
+  ledgerEntries: [],
+  ledgerDraft: { date: '', qty: '', details: '', pic: '', in: '', out: '' },
 };
 
 function el(html){
@@ -336,7 +339,7 @@ async function restoreAuth(){
     await fetchCurrentUser();
     await loadProfile();
     const ok = await testConnection();
-    if(ok){ await checkDiscountColumn(); await checkConsignMemberColumn(); await fetchProducts(); await fetchMembers(); }
+    if(ok){ await checkDiscountColumn(); await checkConsignMemberColumn(); await checkLedgerReady(); await fetchProducts(); await fetchMembers(); }
     return ok;
   }catch(e){
     clearSession();
@@ -369,6 +372,7 @@ async function login(email, password){
     if(!await testConnection()) throw new Error('Signed in, but the POS tables could not be reached. Check your Supabase setup.');
     await checkDiscountColumn();
     await checkConsignMemberColumn();
+    await checkLedgerReady();
     state.tab = 'pos';
     await fetchProducts();
     await fetchMembers();
@@ -423,6 +427,7 @@ function switchTab(tab){
   if(tab === 'history') fetchSales();
   if(tab === 'items') fetchSaleItems();
   if(tab === 'consign') fetchConsignments();
+  if(tab === 'ledger') fetchLedger();
   if(tab === 'members') fetchMembers();
   if(tab === 'settings') fetchAppUsers();
 }
@@ -645,6 +650,16 @@ async function checkConsignMemberColumn(){
   }
 }
 
+// Detect once whether the ledger_entries table exists (see Settings SQL)
+async function checkLedgerReady(){
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/ledger_entries?select=id&limit=1`, { headers: supaHeaders() });
+    state.ledgerReady = res.ok;
+  }catch(e){
+    state.ledgerReady = false;
+  }
+}
+
 function addToCart(product){
   if(blockViewer()) return;
   const existing = state.cart.find(c=>c.id===product.id);
@@ -792,6 +807,9 @@ async function checkout(){
     state.tendered = '';
     state.saleMemberId = '';
     await fetchProducts();
+    const itemsSummary = itemRows.map(r => `${r.qty}x ${r.product_name}`).join(', ');
+    await postSaleToLedger(saleId, total, itemsSummary);
+    if(state.tab === 'ledger') await fetchLedger();
     showToast('Sale recorded — ' + money(total));
   }catch(e){
     showToast('Checkout failed: ' + e.message, true);
@@ -849,6 +867,95 @@ async function setStock(id, newStock){
     body: JSON.stringify({ stock: Math.max(0, Math.floor(newStock)) })
   });
   if(!res.ok) throw new Error('Could not update stock');
+}
+
+/* ---------- Ledger (Balance Sheet) ---------- */
+
+async function fetchLedger(){
+  if(!state.connected || !state.ledgerReady) return;
+  state.loading = true; render();
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/ledger_entries?select=*&order=created_at.asc&limit=1000`, { headers: supaHeaders() });
+    if(!res.ok) throw new Error('Failed to load ledger');
+    state.ledgerEntries = await res.json();
+  }catch(e){
+    showToast('Could not load ledger: ' + e.message, true);
+  }
+  state.loading = false; render();
+}
+
+// Returns ledger entries in display order (oldest first) each tagged with its
+// running balance, computed client-side: previous balance + in - out.
+function ledgerWithBalances(){
+  let bal = 0;
+  return state.ledgerEntries.map(e => {
+    bal += (Number(e.amount_in)||0) - (Number(e.amount_out)||0);
+    return Object.assign({}, e, { balance: bal });
+  });
+}
+
+async function addLedgerEntry(){
+  if(blockViewer()) return;
+  const d = state.ledgerDraft;
+  const details = (d.details||'').trim();
+  if(!details){ showToast('Enter the item/details.', true); return; }
+  const row = {
+    entry_date: d.date || null,
+    qty: (d.qty||'').trim() || null,
+    details,
+    pic: (d.pic||'').trim() || null,
+    amount_in: Number(d.in) || 0,
+    amount_out: Number(d.out) || 0,
+    source: 'manual'
+  };
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/ledger_entries`, {
+      method:'POST', headers: supaHeaders(),
+      body: JSON.stringify([row])
+    });
+    if(!res.ok) throw new Error('Could not save entry');
+    state.ledgerDraft = { date: '', qty: '', details: '', pic: '', in: '', out: '' };
+    await fetchLedger();
+    showToast('Ledger entry added.');
+  }catch(e){
+    showToast('Could not add entry: ' + e.message, true);
+  }
+}
+
+async function deleteLedgerEntry(id){
+  if(blockViewer()) return;
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/ledger_entries?id=eq.${id}`, {
+      method:'DELETE', headers: supaHeaders()
+    });
+    if(!res.ok) throw new Error('Delete failed');
+    state.ledgerEntries = state.ledgerEntries.filter(e=>e.id!==id);
+    render();
+  }catch(e){
+    showToast('Could not delete entry: ' + e.message, true);
+  }
+}
+
+// Posts one auto-generated "in" entry to the ledger for a completed sale.
+// Silently skipped if the ledger table hasn't been set up yet (see Settings SQL).
+async function postSaleToLedger(saleId, total, itemsSummary){
+  if(!state.ledgerReady) return;
+  try{
+    await fetch(`${state.supaUrl}/rest/v1/ledger_entries`, {
+      method:'POST', headers: supaHeaders(),
+      body: JSON.stringify([{
+        entry_date: new Date().toISOString().slice(0,10),
+        details: 'Sale: ' + itemsSummary,
+        amount_in: total,
+        amount_out: 0,
+        source: 'sale',
+        sale_id: saleId
+      }])
+    });
+  }catch(e){
+    // non-fatal — the sale itself already succeeded, just log a soft warning
+    console.warn('Could not post sale to ledger:', e.message);
+  }
 }
 
 /* ---------- Consignment ---------- */
@@ -1405,6 +1512,30 @@ create policy "staff can insert products" on products for insert to authenticate
 create policy "staff can update products" on products for update to authenticated using (public.current_user_role() in ('admin','cashier')) with check (public.current_user_role() in ('admin','cashier'));
 create policy "admin can delete products" on products for delete to authenticated using (public.current_user_role() = 'admin');</code>
       </div>
+
+      <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
+        <h2>Ledger (Balance Sheet)</h2>
+        <div class="setup-note">I-run ito nang isang beses para gumana ang Ledger tab. Awtomatikong pumapasok dito ang bawat Sale bilang "in". Puwedeng magdagdag ng manual entries (bills, salary, atbp.) ang Admin at Cashier.</div>
+        <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">create table if not exists ledger_entries (
+  id uuid primary key default gen_random_uuid(),
+  entry_date date,
+  qty text,
+  details text not null,
+  pic text,
+  amount_in numeric not null default 0,
+  amount_out numeric not null default 0,
+  source text not null default 'manual',
+  sale_id uuid references sales(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+
+alter table ledger_entries enable row level security;
+
+drop policy if exists "authenticated can read ledger" on ledger_entries;
+drop policy if exists "staff can write ledger" on ledger_entries;
+create policy "authenticated can read ledger" on ledger_entries for select to authenticated using (true);
+create policy "staff can write ledger" on ledger_entries for all to authenticated using (public.current_user_role() in ('admin','cashier')) with check (public.current_user_role() in ('admin','cashier'));</code>
+      </div>
     </div>
   </div>`;
 }
@@ -1546,6 +1677,69 @@ function renderProducts(){
   return '<div class="grid"><div class="panel">' + leftPanel + '</div><div class="panel">' +
     '<h2>All products <span style="font-weight:400; color:var(--ink-dim);">— ' + (isViewer() ? 'view only' : 'tap one to edit or restock') + '</span></h2>' +
     '<div class="product-list">' + rows + '</div></div></div>';
+}
+
+function renderLedger(){
+  if(!state.ledgerReady){
+    return `<div class="panel">
+      <h2>Ledger</h2>
+      <div class="setup-note">Hindi pa naka-set up ang Ledger. Pumunta sa <strong>Settings</strong> (Admin only) at i-run ang SQL sa ilalim ng "Ledger (Balance Sheet)" section, isang beses lang.</div>
+    </div>`;
+  }
+
+  const rows = ledgerWithBalances();
+  const d = state.ledgerDraft;
+
+  const addForm = isViewer() ? '' : `
+    <div class="panel" style="margin-bottom:14px;">
+      <h2>Add entry</h2>
+      <div class="row2">
+        <div class="field"><label>Date</label><input id="lg-date" type="date" value="${d.date}"></div>
+        <div class="field"><label>Qty (optional, e.g. 5 or 1.8kg)</label><input id="lg-qty" value="${escapeHtml(d.qty)}"></div>
+      </div>
+      <div class="field"><label>Details</label><input id="lg-details" placeholder="e.g. tablea sahod, bills, salary" value="${escapeHtml(d.details)}"></div>
+      <div class="row2">
+        <div class="field"><label>PIC (person/branch)</label><input id="lg-pic" value="${escapeHtml(d.pic)}"></div>
+        <div></div>
+      </div>
+      <div class="row2">
+        <div class="field"><label>In (\u20B1)</label><input id="lg-in" type="number" step="0.01" placeholder="0" value="${d.in}"></div>
+        <div class="field"><label>Out (\u20B1)</label><input id="lg-out" type="number" step="0.01" placeholder="0" value="${d.out}"></div>
+      </div>
+      <button class="primary" id="btn-add-ledger">Add to ledger</button>
+    </div>`;
+
+  const currentBalance = rows.length ? rows[rows.length-1].balance : 0;
+
+  const listRows = rows.slice().reverse().map(e => {
+    const dateLabel = e.entry_date ? e.entry_date : '';
+    return `
+    <div class="sale-row">
+      <div class="head">
+        <span>${escapeHtml(dateLabel)}${e.qty ? ' \u00B7 ' + escapeHtml(e.qty) : ''}${e.pic ? ' \u00B7 ' + escapeHtml(e.pic) : ''}${e.source === 'sale' ? ' <span class="tag closed">Sale</span>' : ''}</span>
+        <span class="amt mono">${money(e.balance)}</span>
+      </div>
+      <div class="items" style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+        <span>${escapeHtml(e.details)}${Number(e.amount_in)>0 ? ' \u00B7 <span style="color:#8fd39b;">+' + money(e.amount_in) + '</span>' : ''}${Number(e.amount_out)>0 ? ' \u00B7 <span style="color:#e08a8a;">-' + money(e.amount_out) + '</span>' : ''}</span>
+        ${(!isViewer() && e.source === 'manual') ? `<button class="icon-btn" data-del-ledger="${e.id}" title="Delete">\u2715</button>` : ''}
+      </div>
+    </div>`;
+  }).join('') || `<div class="empty">No ledger entries yet.</div>`;
+
+  return `
+  <div class="grid">
+    <div class="panel">
+      ${addForm}
+    </div>
+    <div class="panel">
+      <h2 style="display:flex; align-items:center; justify-content:space-between;">
+        <span>Ledger</span>
+        <span class="amt mono">${money(currentBalance)}</span>
+      </h2>
+      <div class="setup-note" style="margin-bottom:10px;">Awtomatikong pumapasok dito ang bawat Sale (\u201cin\u201d). Manual na idinadagdag ang ibang items \u2014 bills, salary, atbp. Running balance: nakaraang balance + In \u2212 Out.</div>
+      ${listRows}
+    </div>
+  </div>`;
 }
 
 function renderHistory(){
@@ -1785,6 +1979,8 @@ function render(){
     body = renderSaleItems();
   } else if(state.tab === 'consign'){
     body = renderConsign();
+  } else if(state.tab === 'ledger'){
+    body = renderLedger();
   } else {
     body = renderHistory();
   }
@@ -1799,6 +1995,7 @@ function render(){
       '<button data-tab="members" class="' + active('members') + '">Members</button>' +
       '<button data-tab="history" class="' + active('history') + '">History</button>' +
       '<button data-tab="items" class="' + active('items') + '">Sale Items</button>' +
+      '<button data-tab="ledger" class="' + active('ledger') + '">Ledger</button>' +
       (isAdmin() ? '<button data-tab="settings" class="' + active('settings') + '">Settings</button>' : '') +
     '</nav>' : '';
   const userBar = state.connected ?
@@ -2080,6 +2277,25 @@ function render(){
 
   const exportExcelBtn = document.getElementById('btn-export-excel');
   if(exportExcelBtn) exportExcelBtn.addEventListener('click', exportHistoryToExcel);
+
+  /* ledger */
+  const lgDate = document.getElementById('lg-date');
+  if(lgDate) lgDate.addEventListener('input', ()=>{ state.ledgerDraft.date = lgDate.value; });
+  const lgQty = document.getElementById('lg-qty');
+  if(lgQty) lgQty.addEventListener('input', ()=>{ state.ledgerDraft.qty = lgQty.value; });
+  const lgDetails = document.getElementById('lg-details');
+  if(lgDetails) lgDetails.addEventListener('input', ()=>{ state.ledgerDraft.details = lgDetails.value; });
+  const lgPic = document.getElementById('lg-pic');
+  if(lgPic) lgPic.addEventListener('input', ()=>{ state.ledgerDraft.pic = lgPic.value; });
+  const lgIn = document.getElementById('lg-in');
+  if(lgIn) lgIn.addEventListener('input', ()=>{ state.ledgerDraft.in = lgIn.value; });
+  const lgOut = document.getElementById('lg-out');
+  if(lgOut) lgOut.addEventListener('input', ()=>{ state.ledgerDraft.out = lgOut.value; });
+  const addLedgerBtn = document.getElementById('btn-add-ledger');
+  if(addLedgerBtn) addLedgerBtn.addEventListener('click', addLedgerEntry);
+  app.querySelectorAll('[data-del-ledger]').forEach(b=>{
+    b.addEventListener('click', ()=> deleteLedgerEntry(b.dataset.delLedger));
+  });
 }
 
 async function init(){
