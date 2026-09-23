@@ -922,20 +922,6 @@ async function addLedgerEntry(){
   }
 }
 
-async function deleteLedgerEntry(id){
-  if(blockViewer()) return;
-  try{
-    const res = await fetch(`${state.supaUrl}/rest/v1/ledger_entries?id=eq.${id}`, {
-      method:'DELETE', headers: supaHeaders()
-    });
-    if(!res.ok) throw new Error('Delete failed');
-    state.ledgerEntries = state.ledgerEntries.filter(e=>e.id!==id);
-    render();
-  }catch(e){
-    showToast('Could not delete entry: ' + e.message, true);
-  }
-}
-
 // Posts one auto-generated "in" entry to the ledger for a completed sale.
 // Silently skipped if the ledger table hasn't been set up yet (see Settings SQL).
 async function postSaleToLedger(saleId, total, itemsSummary){
@@ -1721,7 +1707,6 @@ function renderLedger(){
       </div>
       <div class="items" style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
         <span>${escapeHtml(e.details)}${Number(e.amount_in)>0 ? ' \u00B7 <span style="color:#8fd39b;">+' + money(e.amount_in) + '</span>' : ''}${Number(e.amount_out)>0 ? ' \u00B7 <span style="color:#e08a8a;">-' + money(e.amount_out) + '</span>' : ''}</span>
-        ${(!isViewer() && e.source === 'manual') ? `<button class="icon-btn" data-del-ledger="${e.id}" title="Delete">\u2715</button>` : ''}
       </div>
     </div>`;
   }).join('') || `<div class="empty">No ledger entries yet.</div>`;
@@ -2293,9 +2278,6 @@ function render(){
   if(lgOut) lgOut.addEventListener('input', ()=>{ state.ledgerDraft.out = lgOut.value; });
   const addLedgerBtn = document.getElementById('btn-add-ledger');
   if(addLedgerBtn) addLedgerBtn.addEventListener('click', addLedgerEntry);
-  app.querySelectorAll('[data-del-ledger]').forEach(b=>{
-    b.addEventListener('click', ()=> deleteLedgerEntry(b.dataset.delLedger));
-  });
 }
 
 async function init(){
