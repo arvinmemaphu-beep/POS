@@ -58,10 +58,44 @@
   }
   nav.tabs button.active{ color: var(--gold); border-bottom-color: var(--gold); }
   nav.tabs button:hover{ color: var(--ink); }
-  @media (max-width: 480px){
-    nav.tabs{ justify-content: center; width: 100%; }
-    nav.tabs button{ padding: 8px 11px; }
+
+  /* ── MOBILE: hamburger menu ── */
+  .burger{
+    display:none; background:none; border:1px solid var(--line); border-radius: var(--radius);
+    color: var(--ink); font-size: 20px; line-height:1; padding: 8px 12px; cursor:pointer;
   }
+  .burger:active{ background: var(--bg-panel-2); }
+  @media (max-width: 720px){
+    .burger{ display:inline-block; margin-left:auto; }
+    header.top{ align-items:center; }
+    .user-bar{ display:none !important; } /* desktop user-bar itago sa mobile — nasa drawer na */
+    nav.tabs{
+      display:none; position:fixed; z-index:90;
+      top:0; right:0; width:min(78vw, 320px); height:100vh; height:100dvh;
+      flex-direction:column; justify-content:flex-start; align-items:stretch;
+      gap:0; padding: 14px 0 90px; overflow-y:auto;
+      background: var(--bg-panel); border-left:1px solid var(--line);
+      box-shadow: -12px 0 32px rgba(0,0,0,0.45);
+    }
+    nav.tabs.open{ display:flex; }
+    nav.tabs button{
+      text-align:left; padding: 15px 22px; font-size:16px;
+      border-bottom:none; border-left:3px solid transparent; border-radius:0;
+    }
+    nav.tabs button.active{ border-left-color: var(--gold); background: var(--bg-panel-2); }
+    .scrim{
+      display:none; position:fixed; inset:0; z-index:80;
+      background: rgba(0,0,0,0.45); border:none; padding:0; cursor:pointer;
+    }
+    .scrim.open{ display:block; }
+    .m-userbar{
+      display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+      padding: 14px 22px 6px; border-top: 1px solid var(--line); margin-top: 10px;
+      color: var(--ink-dim); font-size:12px;
+    }
+    .m-userbar button{ padding:5px 9px; }
+  }
+  @media (min-width: 721px){ .scrim, .m-userbar{ display:none !important; } }
 
   .status-dot{ display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:6px; }
   .status-ok{ background: var(--green); }
@@ -220,6 +254,7 @@ const state = {
   consignPickQty: '',
   settle: {},           // item_id -> {sold, returned}
   busy: false,
+  menuOpen: false,
   members: [],
   editingMember: null,  // {id, full_name, phone, share_capital} member being edited
   memberSearch: '',
@@ -423,6 +458,7 @@ function switchTab(tab){
     return;
   }
   state.tab = tab;
+  state.menuOpen = false;
   render();
   if(tab === 'history') fetchSales();
   if(tab === 'items') fetchSaleItems();
@@ -1971,8 +2007,10 @@ function render(){
   }
 
   const active = tab => state.tab === tab ? 'active' : '';
+  const mobileUser = state.connected ?
+    '<div class="m-userbar"><span class="role-badge">' + escapeHtml(roleLabel()) + '</span><span>' + escapeHtml(state.user && state.user.email ? state.user.email : 'Signed in') + '</span><button class="ghost" id="btn-logout-m" style="padding:5px 9px;">Sign out</button></div>' : '';
   const nav = state.connected ?
-    '<nav class="tabs">' +
+    '<nav class="tabs' + (state.menuOpen ? ' open' : '') + '">' +
       (isViewer() ? '' : '<button data-tab="pos" class="' + active('pos') + '">Sell</button>') +
       '<button data-tab="products" class="' + active('products') + '">Products</button>' +
       '<button data-tab="consign" class="' + active('consign') + '">Consign</button>' +
@@ -1982,13 +2020,18 @@ function render(){
       '<button data-tab="items" class="' + active('items') + '">Sale Items</button>' +
       '<button data-tab="ledger" class="' + active('ledger') + '">Ledger</button>' +
       (isAdmin() ? '<button data-tab="settings" class="' + active('settings') + '">Settings</button>' : '') +
+      mobileUser +
     '</nav>' : '';
+  const burger = state.connected ? '<button class="burger" id="btn-burger" aria-label="Menu">☰</button>' : '';
+  const scrim = state.connected ? '<button class="scrim' + (state.menuOpen ? ' open' : '') + '" aria-label="Close menu" tabindex="-1"></button>' : '';
   const userBar = state.connected ?
     '<div class="user-bar"><span class="role-badge">' + escapeHtml(roleLabel()) + '</span><span>' + escapeHtml(state.user && state.user.email ? state.user.email : 'Signed in') + '</span><button class="ghost" id="btn-logout" style="padding:5px 9px;">Sign out</button></div>' : '';
 
   app.innerHTML =
     '<header class="top"><div><h1 class="serif">CCFACO POS</h1><div class="sub">Designed by: Arvin B.</div></div>' +
+    burger +
     '<div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px;">' + nav + userBar + '</div></header>' +
+    scrim +
     body +
     (state.toast ? '<div class="toast ' + (state.toast.isErr ? 'err' : '') + '">' + escapeHtml(state.toast.msg) + '</div>' : '');
 
@@ -2052,6 +2095,13 @@ function render(){
 
   const logoutBtn = document.getElementById('btn-logout');
   if(logoutBtn) logoutBtn.addEventListener('click', logout);
+  const logoutBtnM = document.getElementById('btn-logout-m');
+  if(logoutBtnM) logoutBtnM.addEventListener('click', logout);
+
+  const burgerBtn = document.getElementById('btn-burger');
+  if(burgerBtn) burgerBtn.addEventListener('click', ()=>{ state.menuOpen = !state.menuOpen; render(); });
+  const scrimEl = app.querySelector('.scrim');
+  if(scrimEl) scrimEl.addEventListener('click', ()=>{ state.menuOpen = false; render(); });
 
   app.querySelectorAll('.product-row[data-id]').forEach(r=>{
     r.addEventListener('click', ()=>{
