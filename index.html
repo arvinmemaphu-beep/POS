@@ -306,6 +306,12 @@
     .nav-sub{ position:static; min-width:0; border:none; box-shadow:none; background:transparent; padding:0; }
     nav.tabs .nav-sub button{ padding:13px 22px 13px 40px; }
   }
+  .rc-svg{ width:100%; height:auto; display:block; }
+  .rc-grid{ stroke:var(--line); stroke-width:1; }
+  .rc-bar{ fill:var(--gold); -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  .rc-txt{ fill:var(--ink-dim); font-size:11px; }
+  .rpt-share{ height:6px; background:var(--bg-panel-2); margin-top:6px; }
+  .rpt-share > div{ height:100%; background:var(--gold); -webkit-print-color-adjust:exact; print-color-adjust:exact; }
   .rpt-stats{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin:14px 0; }
   .rpt-stat{ background:var(--bg-panel-2); border:1px solid var(--line); border-radius:var(--radius); padding:12px; }
   .rpt-stat .lbl{ font-size:12px; color:var(--ink-dim); margin-bottom:4px; }
@@ -1986,17 +1992,45 @@ function reportMonthLabel(){
   const r = reportRange();
   return new Date(r.y, r.m-1, 1).toLocaleDateString(undefined, { month:'long', year:'numeric' });
 }
+function niceCeil(v){
+  if(v <= 0) return 1;
+  const mag = Math.pow(10, Math.floor(Math.log10(v)));
+  const f = v / mag;
+  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * mag;
+}
+function compactNum(n){ return n >= 1000 ? (Math.round(n / 100) / 10) + 'k' : String(Math.round(n)); }
+// Column chart of sales for EVERY day of the month (days with no sales show as empty), drawn as inline SVG.
+function dailyChartSvg(days, y, m){
+  const N = new Date(y, m, 0).getDate();
+  const W = 640, H = 230, L = 46, R = 8, T = 10, B = 26;
+  const plotW = W - L - R, plotH = H - T - B, slot = plotW / N, barW = slot * 0.7;
+  const top = niceCeil(Math.max(0, ...Object.values(days)));
+  const mon = new Date(y, m-1, 1).toLocaleDateString(undefined, { month:'short' });
+  let g = '';
+  for(let i = 0; i <= 4; i++){
+    const yy = T + plotH - plotH * i / 4;
+    g += `<line class="rc-grid" x1="${L}" x2="${W-R}" y1="${yy}" y2="${yy}"/><text class="rc-txt" x="${L-6}" y="${yy+4}" text-anchor="end">${compactNum(top * i / 4)}</text>`;
+  }
+  for(let d = 1; d <= N; d++){
+    const v = days[d] || 0;
+    const cx = L + slot * (d - 0.5);
+    if(v > 0){
+      const h = Math.max(2, v / top * plotH);
+      g += `<rect class="rc-bar" x="${cx - barW/2}" y="${T + plotH - h}" width="${barW}" height="${h}" rx="1"><title>${mon} ${d}: ${money(v)}</title></rect>`;
+    }
+    if(d === 1 || d % 5 === 0) g += `<text class="rc-txt" x="${cx}" y="${H - 8}" text-anchor="middle">${d}</text>`;
+  }
+  return `<svg class="rc-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Sales per day chart">${g}</svg>`;
+}
+
 function renderReport(){
   const label = reportMonthLabel();
   const r = reportRange();
   const c = computeReport();
   const shortMonth = new Date(r.y, r.m-1, 1).toLocaleDateString(undefined, { month:'short' });
-  const maxDay = Math.max(0, ...Object.values(c.days));
-  const dayRows = Object.keys(c.days).map(Number).sort((a,b)=>a-b).map(d=>
-    `<div class="rpt-bar"><span class="d">${shortMonth} ${d}</span><span class="track"><div class="fill" style="width:${maxDay ? Math.max(2, c.days[d]/maxDay*100) : 0}%"></div></span><span class="a mono">${money(c.days[d])}</span></div>`
-  ).join('');
+  const maxRev = c.products.length ? c.products[0].revenue : 0;
   const prodRows = c.products.slice(0, 15).map(p=>
-    `<div class="sale-row"><div class="head"><span>${escapeHtml(p.name)}</span><span class="amt mono">${money(p.revenue)}</span></div><div class="items">${p.qty} sold, ${c.total ? (p.revenue / c.total * 100).toFixed(1) : '0.0'}% of sales</div></div>`
+    `<div class="sale-row"><div class="head"><span>${escapeHtml(p.name)}</span><span class="amt mono">${money(p.revenue)}</span></div><div class="items">${p.qty} sold, ${c.total ? (p.revenue / c.total * 100).toFixed(1) : '0.0'}% of sales</div><div class="rpt-share"><div style="width:${maxRev ? Math.max(2, p.revenue / maxRev * 100) : 0}%"></div></div></div>`
   ).join('');
   const body = state.reportLoading ? '<div class="empty">Loading report...</div>' :
     (c.count === 0 ? `<div class="empty">No sales recorded in ${escapeHtml(label)}.</div>` : `
@@ -2008,7 +2042,7 @@ function renderReport(){
     </div>
     ${c.consignCount ? `<div class="setup-note" style="margin:0 0 14px;">${c.consignCount} consignment${c.consignCount>1?'s':''} settled this month, worth ${money(c.consignValue)}. This is already included in Total sales.</div>` : ''}
     <h2>Sales per day</h2>
-    <div style="margin-bottom:16px;">${dayRows}</div>
+    <div style="margin-bottom:16px;">${dailyChartSvg(c.days, r.y, r.m)}</div>
     <h2>Top products${c.products.length > 15 ? ' (top 15 of ' + c.products.length + ')' : ''}</h2>
     ${prodRows}`);
   return `<div class="panel">
