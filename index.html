@@ -292,6 +292,22 @@
   select{ width:100%; background:var(--bg); border:1px solid var(--line); color:var(--ink);
     padding:9px 10px; border-radius:var(--radius); font-size:14px; font-family:inherit; }
   select:focus{ outline:none; border-color: var(--gold-dim); }
+  .rpt-stats{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin:14px 0; }
+  .rpt-stat{ background:var(--bg-panel-2); border:1px solid var(--line); border-radius:var(--radius); padding:12px; }
+  .rpt-stat .lbl{ font-size:12px; color:var(--ink-dim); margin-bottom:4px; }
+  .rpt-stat .val{ font-size:20px; color:var(--gold); }
+  .rpt-bar{ display:flex; align-items:center; gap:8px; padding:5px 0; font-size:13px; }
+  .rpt-bar .d{ width:52px; color:var(--ink-dim); }
+  .rpt-bar .track{ flex:1; height:8px; background:var(--bg-panel-2); }
+  .rpt-bar .fill{ height:100%; background:var(--gold); -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  .rpt-bar .a{ width:96px; text-align:right; }
+  .rpt-controls{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:10px 0; }
+  .rpt-controls input{ width:auto; }
+  @media print{
+    :root[data-theme]{ --bg:#fff; --bg-panel:#fff; --bg-panel-2:#eee; --ink:#000; --ink-dim:#444; --line:#bbb; --gold:#000; --gold-dim:#555; }
+    header.top, .no-print, .toast, .scrim, .burger{ display:none !important; }
+    body{ background:#fff; }
+  }
 </style>
 <script>
 /* Color themes. Each person's pick is saved on their own device (localStorage).
@@ -373,6 +389,10 @@ const state = {
   ledgerEntries: [],
   ledgerDraft: { date: '', qty: '', details: '', pic: '', in: '', out: '' },
   themeOpen: false,       // true while the color theme popover is open
+  reportMonth: '',        // 'YYYY-MM' picked in the Report tab
+  reportSales: [],
+  reportConsign: [],
+  reportLoading: false,
 };
 
 function el(html){
@@ -561,6 +581,10 @@ function switchTab(tab){
     showToast('Settings is available to Admin only.', true);
     return;
   }
+  if(tab === 'report' && !canSeeReport()){
+    showToast('The report is available to Admin and Regular users only.', true);
+    return;
+  }
   state.tab = tab;
   state.menuOpen = false;
   render();
@@ -568,6 +592,7 @@ function switchTab(tab){
   if(tab === 'items') fetchSaleItems();
   if(tab === 'consign') fetchConsignments();
   if(tab === 'ledger') fetchLedger();
+  if(tab === 'report') fetchReport();
   if(tab === 'members') fetchMembers();
   if(tab === 'settings') fetchAppUsers();
 }
@@ -1867,6 +1892,148 @@ function renderLedger(){
   </div>`;
 }
 
+/* ---------- Monthly sales report ---------- */
+// Consignment sales are already saved as normal sales when a consignment is settled,
+// so this report is built from the sales + sale_items tables and nothing is double counted.
+function canSeeReport(){ return isAdmin() || isViewer(); }
+function defaultReportMonth(){
+  const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0');
+}
+function reportRange(){
+  const parts = (state.reportMonth || defaultReportMonth()).split('-').map(Number);
+  return { y: parts[0], m: parts[1], start: new Date(parts[0], parts[1]-1, 1), end: new Date(parts[0], parts[1], 1) };
+}
+function shiftReportMonth(delta){
+  const r = reportRange();
+  const d = new Date(r.y, r.m-1+delta, 1);
+  state.reportMonth = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0');
+  fetchReport();
+}
+async function fetchReport(){
+  if(!state.connected) return;
+  if(!state.reportMonth) state.reportMonth = defaultReportMonth();
+  const token = state.reportMonth;
+  const r = reportRange();
+  const range = (col)=> `${col}=gte.${encodeURIComponent(r.start.toISOString())}&${col}=lt.${encodeURIComponent(r.end.toISOString())}`;
+  state.reportLoading = true; render();
+  try{
+    const all = [];
+    const step = 1000;
+    for(let from = 0; ; from += step){
+      const res = await fetch(`${state.supaUrl}/rest/v1/sales?select=created_at,total,sale_items(product_name,price,qty)&${range('created_at')}&order=created_at.asc`,
+        { headers: Object.assign({}, supaHeaders(), { 'Range-Unit':'items', 'Range': `${from}-${from+step-1}` }) });
+      if(!res.ok) throw new Error('Failed to load sales');
+      const rows = await res.json();
+      all.push(...rows);
+      if(rows.length < step) break;
+    }
+    let consign = [];
+    try{
+      const cRes = await fetch(`${state.supaUrl}/rest/v1/consignments?select=*,consignment_items(*)&status=eq.closed&${range('settled_at')}`, { headers: supaHeaders() });
+      if(cRes.ok) consign = await cRes.json();
+    }catch(e){ /* consignment note is optional */ }
+    if(token !== state.reportMonth) return; // month changed while loading
+    state.reportSales = all;
+    state.reportConsign = consign;
+  }catch(e){
+    showToast('Could not load report: ' + e.message, true);
+  }
+  state.reportLoading = false; render();
+}
+function computeReport(){
+  const days = {}, prods = {};
+  let total = 0;
+  state.reportSales.forEach(s=>{
+    const t = Number(s.total) || 0;
+    total += t;
+    const day = new Date(s.created_at).getDate();
+    days[day] = (days[day] || 0) + t;
+    (s.sale_items || []).forEach(i=>{
+      const name = (i.product_name || '').trim() || '(no name)';
+      const key = name.toLowerCase();
+      const p = prods[key] || (prods[key] = { name, qty:0, revenue:0 });
+      const q = Number(i.qty) || 0;
+      p.qty += q;
+      p.revenue += (Number(i.price) || 0) * q;
+    });
+  });
+  const count = state.reportSales.length;
+  const products = Object.values(prods).sort((a,b)=> b.revenue - a.revenue);
+  let bestDay = null;
+  Object.keys(days).forEach(d=>{ if(!bestDay || days[d] > days[bestDay]) bestDay = d; });
+  const consignValue = state.reportConsign.reduce((sum,c)=>
+    sum + (c.consignment_items || []).reduce((x,i)=> x + consignUnitPrice(i, c) * (i.qty_sold || 0), 0), 0);
+  return { total, count, avg: count ? total / count : 0, days, products, bestDay, consignCount: state.reportConsign.length, consignValue };
+}
+function reportMonthLabel(){
+  const r = reportRange();
+  return new Date(r.y, r.m-1, 1).toLocaleDateString(undefined, { month:'long', year:'numeric' });
+}
+function renderReport(){
+  const label = reportMonthLabel();
+  const r = reportRange();
+  const c = computeReport();
+  const shortMonth = new Date(r.y, r.m-1, 1).toLocaleDateString(undefined, { month:'short' });
+  const maxDay = Math.max(0, ...Object.values(c.days));
+  const dayRows = Object.keys(c.days).map(Number).sort((a,b)=>a-b).map(d=>
+    `<div class="rpt-bar"><span class="d">${shortMonth} ${d}</span><span class="track"><div class="fill" style="width:${maxDay ? Math.max(2, c.days[d]/maxDay*100) : 0}%"></div></span><span class="a mono">${money(c.days[d])}</span></div>`
+  ).join('');
+  const prodRows = c.products.slice(0, 15).map(p=>
+    `<div class="sale-row"><div class="head"><span>${escapeHtml(p.name)}</span><span class="amt mono">${money(p.revenue)}</span></div><div class="items">${p.qty} sold, ${c.total ? (p.revenue / c.total * 100).toFixed(1) : '0.0'}% of sales</div></div>`
+  ).join('');
+  const body = state.reportLoading ? '<div class="empty">Loading report...</div>' :
+    (c.count === 0 ? `<div class="empty">No sales recorded in ${escapeHtml(label)}.</div>` : `
+    <div class="rpt-stats">
+      <div class="rpt-stat"><div class="lbl">Total sales</div><div class="val mono">${money(c.total)}</div></div>
+      <div class="rpt-stat"><div class="lbl">Transactions</div><div class="val mono">${c.count}</div></div>
+      <div class="rpt-stat"><div class="lbl">Average per sale</div><div class="val mono">${money(c.avg)}</div></div>
+      <div class="rpt-stat"><div class="lbl">Best day</div><div class="val mono">${c.bestDay ? shortMonth + ' ' + c.bestDay : '-'}</div><div class="lbl" style="margin:2px 0 0;">${c.bestDay ? money(c.days[c.bestDay]) : ''}</div></div>
+    </div>
+    ${c.consignCount ? `<div class="setup-note" style="margin:0 0 14px;">${c.consignCount} consignment${c.consignCount>1?'s':''} settled this month, worth ${money(c.consignValue)}. This is already included in Total sales.</div>` : ''}
+    <h2>Sales per day</h2>
+    <div style="margin-bottom:16px;">${dayRows}</div>
+    <h2>Top products${c.products.length > 15 ? ' (top 15 of ' + c.products.length + ')' : ''}</h2>
+    ${prodRows}`);
+  return `<div class="panel">
+    <h2>Monthly Sales Report: ${escapeHtml(label)}</h2>
+    <div class="rpt-controls no-print">
+      <button class="ghost" id="btn-rpt-prev" aria-label="Previous month">&lsaquo; Prev</button>
+      <input type="month" id="rpt-month" value="${state.reportMonth || defaultReportMonth()}">
+      <button class="ghost" id="btn-rpt-next" aria-label="Next month">Next &rsaquo;</button>
+      <span style="flex:1"></span>
+      <button class="ghost" id="btn-rpt-print">Print / Save PDF</button>
+      <button class="ghost" id="btn-rpt-excel">Export to Excel</button>
+    </div>
+    ${body}
+  </div>`;
+}
+function exportReportToExcel(){
+  const c = computeReport();
+  if(c.count === 0){ showToast('No sales in this month to export.', true); return; }
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([
+    { Item:'Month', Value: reportMonthLabel() },
+    { Item:'Total sales', Value: c.total },
+    { Item:'Transactions', Value: c.count },
+    { Item:'Average per sale', Value: Math.round(c.avg * 100) / 100 },
+    { Item:'Consignments settled', Value: c.consignCount },
+    { Item:'Consignment sold value (already in total)', Value: c.consignValue }
+  ]), 'Summary');
+  const r = reportRange();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(Object.keys(c.days).map(Number).sort((a,b)=>a-b).map(d=>
+    ({ Date: new Date(r.y, r.m-1, d).toLocaleDateString(), Sales: c.days[d] }))), 'By Day');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(c.products.map(p=>
+    ({ Product: p.name, 'Qty Sold': p.qty, Revenue: p.revenue }))), 'By Product');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(state.reportSales.map(s=>{
+    const d = new Date(s.created_at);
+    return { Date: d.toLocaleDateString(), Time: d.toLocaleTimeString(),
+      Items: (s.sale_items || []).map(i => `${i.qty}x ${i.product_name}`).join(', '), Total: Number(s.total) };
+  })), 'Sales');
+  XLSX.writeFile(wb, `CCFACO-Sales-${state.reportMonth}.xlsx`);
+  showToast('Monthly report downloaded.');
+}
+
 function renderHistory(){
   const rows = state.sales.map(s => {
     const d = new Date(s.created_at);
@@ -2109,6 +2276,7 @@ function themeMarkup(){
 function render(){
   const app = document.getElementById('app');
   if(state.connected && state.tab === 'settings' && !isAdmin()) state.tab = 'pos';
+  if(state.connected && state.tab === 'report' && !canSeeReport()) state.tab = 'pos';
   let body;
   if(!state.supaUrl || !state.supaKey){
     body = renderSetup();
@@ -2128,6 +2296,8 @@ function render(){
     body = renderConsign();
   } else if(state.tab === 'ledger'){
     body = renderLedger();
+  } else if(state.tab === 'report'){
+    body = renderReport();
   } else {
     body = renderHistory();
   }
@@ -2145,6 +2315,7 @@ function render(){
       '<button data-tab="history" class="' + active('history') + '">History</button>' +
       '<button data-tab="items" class="' + active('items') + '">Sale Items</button>' +
       '<button data-tab="ledger" class="' + active('ledger') + '">Ledger</button>' +
+      (canSeeReport() ? '<button data-tab="report" class="' + active('report') + '">Report</button>' : '') +
       (isAdmin() ? '<button data-tab="settings" class="' + active('settings') + '">Settings</button>' : '') +
       mobileUser +
     '</nav>' : '';
@@ -2444,6 +2615,18 @@ function render(){
 
   const exportExcelBtn = document.getElementById('btn-export-excel');
   if(exportExcelBtn) exportExcelBtn.addEventListener('click', exportHistoryToExcel);
+
+  /* monthly report */
+  const rptMonth = document.getElementById('rpt-month');
+  if(rptMonth) rptMonth.addEventListener('change', ()=>{ state.reportMonth = rptMonth.value || defaultReportMonth(); fetchReport(); });
+  const rptPrev = document.getElementById('btn-rpt-prev');
+  if(rptPrev) rptPrev.addEventListener('click', ()=> shiftReportMonth(-1));
+  const rptNext = document.getElementById('btn-rpt-next');
+  if(rptNext) rptNext.addEventListener('click', ()=> shiftReportMonth(1));
+  const rptPrint = document.getElementById('btn-rpt-print');
+  if(rptPrint) rptPrint.addEventListener('click', ()=> window.print());
+  const rptExcel = document.getElementById('btn-rpt-excel');
+  if(rptExcel) rptExcel.addEventListener('click', exportReportToExcel);
 
   /* ledger */
   const lgDate = document.getElementById('lg-date');
