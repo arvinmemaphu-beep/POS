@@ -24,7 +24,45 @@
     --gold-dim: #A88A3F;
     --red: #C1584A;
     --green: #6FA383;
+    --on-accent: #1B2A20;
+    --accent-hover: #E5C36B;
+    --err-ink: #F0B3AB;
+    --pos: #8fd39b;
+    --neg: #e08a8a;
     --radius: 3px;
+    color-scheme: dark;
+  }
+  /* ── COLOR THEMES: --gold is the accent colour. Green is the default (no data-theme). ── */
+  :root[data-theme="blue"]{
+    --bg:#0F1B2D; --bg-panel:#16263E; --bg-panel-2:#1C3050; --ink:#EAF1FB; --ink-dim:#A7B7CE; --line:#2B4364;
+    --gold:#6FB1F2; --gold-dim:#4A88C4; --red:#E0685A; --green:#6CC29A;
+    --on-accent:#0B1626; --accent-hover:#8CC4F7; --err-ink:#F5B7AF;
+  }
+  :root[data-theme="purple"]{
+    --bg:#1B1428; --bg-panel:#251B38; --bg-panel-2:#2E2247; --ink:#F1EBFA; --ink-dim:#B8AACF; --line:#40315C;
+    --gold:#C39BF0; --gold-dim:#9670C8; --red:#E06A7A; --green:#7FCFA0;
+    --on-accent:#1B1428; --accent-hover:#D3B4F5; --err-ink:#F5B7C0;
+  }
+  :root[data-theme="red"]{
+    --bg:#241214; --bg-panel:#301A1D; --bg-panel-2:#3B2225; --ink:#F8ECE8; --ink-dim:#CDB0AA; --line:#4E2E32;
+    --gold:#F08A7C; --gold-dim:#C0605A; --red:#E2503F; --green:#7CC79A;
+    --on-accent:#241214; --accent-hover:#F5A196; --err-ink:#F7BDB4;
+  }
+  :root[data-theme="orange"]{
+    --bg:#241A0E; --bg-panel:#2F2213; --bg-panel-2:#3A2B19; --ink:#F8EFE0; --ink-dim:#CDBB9F; --line:#4F3D24;
+    --gold:#F2A93B; --gold-dim:#BF8025; --red:#D9614F; --green:#86B87A;
+    --on-accent:#241A0E; --accent-hover:#F6BC62; --err-ink:#F3B8AE;
+  }
+  :root[data-theme="dark"]{
+    --bg:#0E0F11; --bg-panel:#1A1D21; --bg-panel-2:#23272D; --ink:#EDEFF2; --ink-dim:#A5ACB6; --line:#333943;
+    --gold:#56C7D6; --gold-dim:#3A97A4; --red:#E0685A; --green:#6CC29A;
+    --on-accent:#0B1A1D; --accent-hover:#7ED8E4; --err-ink:#F5B7AF;
+  }
+  :root[data-theme="light"]{
+    color-scheme: light;
+    --bg:#F2F4F3; --bg-panel:#FFFFFF; --bg-panel-2:#E8ECEA; --ink:#16211C; --ink-dim:#566259; --line:#D3DAD6;
+    --gold:#1F6B4A; --gold-dim:#2F8A63; --red:#B3392C; --green:#22794F;
+    --on-accent:#FFFFFF; --accent-hover:#185A3D; --err-ink:#8E2A20; --pos:#1E7A45; --neg:#B3392C;
   }
   *{box-sizing:border-box;}
   html,body{margin:0;padding:0;}
@@ -59,6 +97,42 @@
   nav.tabs button.active{ color: var(--gold); border-bottom-color: var(--gold); }
   nav.tabs button:hover{ color: var(--ink); }
 
+  /* ── header right side: nav/user bar, theme button, burger ── */
+  .hdr-right{ display:flex; align-items:flex-start; gap:8px; margin-left:auto; }
+  .hdr-col{ display:flex; flex-direction:column; align-items:flex-end; gap:4px; }
+  .theme-wrap{ position:relative; }
+  .theme-btn{
+    background:none; border:1px solid var(--line); border-radius: var(--radius);
+    color: var(--ink); font-size: 20px; line-height:1; padding: 8px 12px; cursor:pointer;
+  }
+  .theme-btn:active{ background: var(--bg-panel-2); }
+  .theme-scrim{ display:none; position:fixed; inset:0; z-index:99; background:transparent; border:none; padding:0; }
+  .theme-scrim.open{ display:block; }
+  .theme-pop{
+    display:none; position:absolute; top:calc(100% + 8px); right:0; z-index:100; width:236px;
+    background: var(--bg-panel); border:1px solid var(--line); border-radius: var(--radius);
+    padding:10px; box-shadow: 0 12px 32px rgba(0,0,0,0.35);
+  }
+  .theme-pop.open{ display:block; }
+  .theme-pop h3{ margin:2px 4px 2px; font-size:15px; font-weight:600; color: var(--ink); }
+  .theme-pop .theme-note{ margin:0 4px 8px; font-size:12px; color: var(--ink-dim); }
+  .theme-opt{
+    display:flex; align-items:center; gap:12px; width:100%; min-height:44px;
+    background:none; border:1px solid transparent; border-radius: var(--radius);
+    color: var(--ink); font-size:16px; padding:6px 8px; cursor:pointer; text-align:left;
+  }
+  .theme-opt:hover{ background: var(--bg-panel-2); }
+  .theme-opt.active{ border-color: var(--gold-dim); }
+  .theme-opt > span:nth-child(2){ flex:1; }
+  .theme-chip{
+    display:inline-flex; align-items:flex-end; width:30px; height:30px; padding:5px;
+    border:1px solid; border-radius: var(--radius); flex:none;
+  }
+  .theme-chip i{ display:block; width:100%; height:6px; border-radius:1px; }
+  .theme-check{ visibility:hidden; color: var(--gold); font-weight:700; }
+  .theme-opt.active .theme-check{ visibility:visible; }
+  .theme-btn:focus-visible, .theme-opt:focus-visible{ outline:2px solid var(--gold); outline-offset:2px; }
+
   /* ── MOBILE: hamburger menu ── */
   .burger{
     display:none; background:none; border:1px solid var(--line); border-radius: var(--radius);
@@ -66,8 +140,10 @@
   }
   .burger:active{ background: var(--bg-panel-2); }
   @media (max-width: 720px){
-    .burger{ display:inline-block; margin-left:auto; }
+    .burger{ display:inline-block; }
     header.top{ align-items:center; }
+    .hdr-right{ align-items:center; }
+    .hdr-col{ display:contents; } /* nav drawer is position:fixed, so it still works */
     .user-bar{ display:none !important; } /* desktop user-bar itago sa mobile — nasa drawer na */
     nav.tabs{
       display:none; position:fixed; z-index:90;
@@ -147,10 +223,10 @@
 
   button.primary{
     width:100%; margin-top:14px; padding: 11px; border:none; border-radius: var(--radius);
-    background: var(--gold); color: #1B2A20; font-weight:600; font-size:14px; cursor:pointer;
+    background: var(--gold); color: var(--on-accent); font-weight:600; font-size:14px; cursor:pointer;
   }
   button.primary:disabled{ opacity:0.4; cursor:not-allowed; }
-  button.primary:hover:not(:disabled){ background:#E5C36B; }
+  button.primary:hover:not(:disabled){ background: var(--accent-hover); }
 
   button.ghost{
     background:none; border:1px solid var(--line); color: var(--ink-dim);
@@ -183,7 +259,7 @@
     padding: 10px 18px; border-radius: var(--radius); font-size: 13px;
     box-shadow: 0 4px 16px rgba(0,0,0,0.3);
   }
-  .toast.err{ border-color: var(--red); color: #F0B3AB; }
+  .toast.err{ border-color: var(--red); color: var(--err-ink); }
 
   .setup-note{
     font-size: 12.5px; color: var(--ink-dim); line-height:1.6; margin-top: 10px;
@@ -191,7 +267,7 @@
   .auth-shell{ display:flex; justify-content:center; padding-top:24px; }
   .auth-card{ width:min(100%, 440px); }
   .auth-card h2{ color:var(--ink); }
-  .auth-error{ color:#F0B3AB; border:1px solid var(--red); padding:10px; margin-top:12px; font-size:13px; line-height:1.45; }
+  .auth-error{ color:var(--err-ink); border:1px solid var(--red); padding:10px; margin-top:12px; font-size:13px; line-height:1.45; }
   .user-bar{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; justify-content:flex-end; color:var(--ink-dim); font-size:12px; }
   .role-badge{ display:inline-block; border:1px solid var(--gold-dim); color:var(--gold); border-radius:10px; padding:2px 8px; text-transform:capitalize; }
   .setup-note code{
@@ -217,6 +293,33 @@
     padding:9px 10px; border-radius:var(--radius); font-size:14px; font-family:inherit; }
   select:focus{ outline:none; border-color: var(--gold-dim); }
 </style>
+<script>
+/* Color themes. Each person's pick is saved on their own device (localStorage).
+   bg / panel / accent below are only for the little preview chips; the real colours are the CSS variables above. */
+const THEMES = {
+  green:  { label:'Green',  bg:'#14261F', panel:'#1B3129', accent:'#D9B65B' },
+  blue:   { label:'Blue',   bg:'#0F1B2D', panel:'#16263E', accent:'#6FB1F2' },
+  purple: { label:'Purple', bg:'#1B1428', panel:'#251B38', accent:'#C39BF0' },
+  red:    { label:'Red',    bg:'#241214', panel:'#301A1D', accent:'#F08A7C' },
+  orange: { label:'Orange', bg:'#241A0E', panel:'#2F2213', accent:'#F2A93B' },
+  dark:   { label:'Dark',   bg:'#0E0F11', panel:'#1A1D21', accent:'#56C7D6' },
+  light:  { label:'Light',  bg:'#F2F4F3', panel:'#FFFFFF', accent:'#1F6B4A' }
+};
+const THEME_KEY = 'pos-theme';
+function currentTheme(){
+  try{ const t = localStorage.getItem(THEME_KEY); if(t && THEMES[t]) return t; }catch(e){}
+  return 'green';
+}
+function applyTheme(name, save){
+  if(!THEMES[name]) name = 'green';
+  document.documentElement.setAttribute('data-theme', name);
+  const m = document.querySelector('meta[name="theme-color"]');
+  if(m) m.setAttribute('content', THEMES[name].bg);
+  if(save){ try{ localStorage.setItem(THEME_KEY, name); }catch(e){} }
+  document.querySelectorAll('.theme-opt').forEach(b=> b.classList.toggle('active', b.dataset.themePick === name));
+}
+applyTheme(currentTheme(), false);
+</script>
 </head>
 <body>
 <div class="app" id="app"></div>
@@ -269,6 +372,7 @@ const state = {
   ledgerReady: false,     // true once the ledger_entries table exists (see Settings SQL)
   ledgerEntries: [],
   ledgerDraft: { date: '', qty: '', details: '', pic: '', in: '', out: '' },
+  themeOpen: false,       // true while the color theme popover is open
 };
 
 function el(html){
@@ -1742,7 +1846,7 @@ function renderLedger(){
         <span class="amt mono">${money(e.balance)}</span>
       </div>
       <div class="items" style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
-        <span>${escapeHtml(e.details)}${Number(e.amount_in)>0 ? ' \u00B7 <span style="color:#8fd39b;">+' + money(e.amount_in) + '</span>' : ''}${Number(e.amount_out)>0 ? ' \u00B7 <span style="color:#e08a8a;">-' + money(e.amount_out) + '</span>' : ''}</span>
+        <span>${escapeHtml(e.details)}${Number(e.amount_in)>0 ? ' \u00B7 <span style="color:var(--pos);">+' + money(e.amount_in) + '</span>' : ''}${Number(e.amount_out)>0 ? ' \u00B7 <span style="color:var(--neg);">-' + money(e.amount_out) + '</span>' : ''}</span>
       </div>
     </div>`;
   }).join('') || `<div class="empty">No ledger entries yet.</div>`;
@@ -1980,6 +2084,28 @@ function renderConsign(){
   </div>`;
 }
 
+function setThemeOpen(open){
+  state.themeOpen = open;
+  document.querySelectorAll('.theme-pop, .theme-scrim').forEach(n=> n.classList.toggle('open', open));
+  const b = document.getElementById('btn-theme');
+  if(b) b.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+function themeMarkup(){
+  const cur = currentTheme();
+  const opts = Object.keys(THEMES).map(k=>{
+    const t = THEMES[k];
+    return '<button type="button" class="theme-opt' + (k === cur ? ' active' : '') + '" data-theme-pick="' + k + '">' +
+      '<span class="theme-chip" style="background:' + t.bg + '; border-color:' + t.accent + ';"><i style="background:' + t.accent + ';"></i></span>' +
+      '<span>' + t.label + '</span><span class="theme-check">\u2713</span></button>';
+  }).join('');
+  return '<div class="theme-wrap">' +
+    '<button class="theme-btn" id="btn-theme" type="button" aria-label="Change color theme" title="Change color theme" aria-expanded="' + (state.themeOpen ? 'true' : 'false') + '">\uD83C\uDFA8</button>' +
+    '<button class="theme-scrim' + (state.themeOpen ? ' open' : '') + '" type="button" aria-label="Close" tabindex="-1"></button>' +
+    '<div class="theme-pop' + (state.themeOpen ? ' open' : '') + '"><h3>Color theme</h3><p class="theme-note">Saved on this device only.</p>' + opts + '</div>' +
+  '</div>';
+}
+
 function render(){
   const app = document.getElementById('app');
   if(state.connected && state.tab === 'settings' && !isAdmin()) state.tab = 'pos';
@@ -2029,8 +2155,7 @@ function render(){
 
   app.innerHTML =
     '<header class="top"><div><h1 class="serif">CCFACO POS</h1><div class="sub">Designed by: Arvin B.</div></div>' +
-    burger +
-    '<div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px;">' + nav + userBar + '</div></header>' +
+    '<div class="hdr-right"><div class="hdr-col">' + nav + userBar + '</div>' + themeMarkup() + burger + '</div></header>' +
     scrim +
     body +
     (state.toast ? '<div class="toast ' + (state.toast.isErr ? 'err' : '') + '">' + escapeHtml(state.toast.msg) + '</div>' : '');
@@ -2052,6 +2177,13 @@ function render(){
   }
 
   // wire events
+  const themeBtnEl = document.getElementById('btn-theme');
+  if(themeBtnEl) themeBtnEl.addEventListener('click', ()=> setThemeOpen(!state.themeOpen));
+  const themeScrimEl = app.querySelector('.theme-scrim');
+  if(themeScrimEl) themeScrimEl.addEventListener('click', ()=> setThemeOpen(false));
+  app.querySelectorAll('[data-theme-pick]').forEach(b=>{
+    b.addEventListener('click', ()=>{ applyTheme(b.dataset.themePick, true); });
+  });
   app.querySelectorAll('nav.tabs button').forEach(b=>{
     b.addEventListener('click', ()=> switchTab(b.dataset.tab));
   });
@@ -2335,6 +2467,8 @@ async function init(){
   if(state.supaUrl && state.supaKey) await restoreAuth();
   render();
 }
+
+document.addEventListener('keydown', ev=>{ if(ev.key === 'Escape' && state.themeOpen) setThemeOpen(false); });
 
 init();
 
