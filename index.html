@@ -292,6 +292,20 @@
   select{ width:100%; background:var(--bg); border:1px solid var(--line); color:var(--ink);
     padding:9px 10px; border-radius:var(--radius); font-size:14px; font-family:inherit; }
   select:focus{ outline:none; border-color: var(--gold-dim); }
+  .nav-group{ position:relative; display:flex; }
+  .nav-sub{
+    display:none; position:absolute; top:100%; right:0; z-index:95; min-width:170px; flex-direction:column;
+    background:var(--bg-panel); border:1px solid var(--line); border-radius:var(--radius);
+    box-shadow:0 8px 24px rgba(0,0,0,0.35); padding:4px 0;
+  }
+  .nav-group.open .nav-sub{ display:flex; }
+  nav.tabs .nav-sub button{ text-align:left; width:100%; padding:11px 18px; font-size:16px; border-bottom:none; border-left:3px solid transparent; border-radius:0; }
+  nav.tabs .nav-sub button.active{ border-left-color:var(--gold); background:var(--bg-panel-2); }
+  @media (max-width: 720px){
+    .nav-group{ flex-direction:column; align-items:stretch; }
+    .nav-sub{ position:static; min-width:0; border:none; box-shadow:none; background:transparent; padding:0; }
+    nav.tabs .nav-sub button{ padding:13px 22px 13px 40px; }
+  }
   .rpt-stats{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin:14px 0; }
   .rpt-stat{ background:var(--bg-panel-2); border:1px solid var(--line); border-radius:var(--radius); padding:12px; }
   .rpt-stat .lbl{ font-size:12px; color:var(--ink-dim); margin-bottom:4px; }
@@ -393,6 +407,7 @@ const state = {
   reportSales: [],
   reportConsign: [],
   reportLoading: false,
+  reportMenuOpen: false,  // true while the Report dropdown (Daily / Monthly / History) is open
 };
 
 function el(html){
@@ -587,6 +602,7 @@ function switchTab(tab){
   }
   state.tab = tab;
   state.menuOpen = false;
+  state.reportMenuOpen = false;
   render();
   if(tab === 'history') fetchSales();
   if(tab === 'items') fetchSaleItems();
@@ -2312,10 +2328,15 @@ function render(){
       '<button data-tab="consign" class="' + active('consign') + '">Consign</button>' +
       // discount is a fixed peso amount per product, set in the Products tab
       '<button data-tab="members" class="' + active('members') + '">Members</button>' +
-      '<button data-tab="history" class="' + active('history') + '">History</button>' +
-      '<button data-tab="items" class="' + active('items') + '">Sale Items</button>' +
+      '<div class="nav-group' + (state.reportMenuOpen ? ' open' : '') + '">' +
+        '<button data-group="report" class="' + (['items','report','history'].indexOf(state.tab) >= 0 ? 'active' : '') + '" aria-haspopup="true" aria-expanded="' + (state.reportMenuOpen ? 'true' : 'false') + '">Report &#9662;</button>' +
+        '<div class="nav-sub">' +
+          '<button data-tab="items" class="' + active('items') + '">Daily</button>' +
+          '<button data-tab="report" class="' + active('report') + '">Monthly</button>' +
+          '<button data-tab="history" class="' + active('history') + '">History</button>' +
+        '</div>' +
+      '</div>' +
       '<button data-tab="ledger" class="' + active('ledger') + '">Ledger</button>' +
-      (canSeeReport() ? '<button data-tab="report" class="' + active('report') + '">Report</button>' : '') +
       (isAdmin() ? '<button data-tab="settings" class="' + active('settings') + '">Settings</button>' : '') +
       mobileUser +
     '</nav>' : '';
@@ -2355,8 +2376,11 @@ function render(){
   app.querySelectorAll('[data-theme-pick]').forEach(b=>{
     b.addEventListener('click', ()=>{ applyTheme(b.dataset.themePick, true); });
   });
-  app.querySelectorAll('nav.tabs button').forEach(b=>{
+  app.querySelectorAll('nav.tabs button[data-tab]').forEach(b=>{
     b.addEventListener('click', ()=> switchTab(b.dataset.tab));
+  });
+  app.querySelectorAll('nav.tabs button[data-group]').forEach(b=>{
+    b.addEventListener('click', ()=>{ state.reportMenuOpen = !state.reportMenuOpen; render(); });
   });
 
   const connectBtn = document.getElementById('btn-connect');
@@ -2651,6 +2675,10 @@ async function init(){
   render();
 }
 
+document.addEventListener('click', ev=>{
+  if(state.reportMenuOpen && !ev.target.closest('.nav-group')){ state.reportMenuOpen = false; render(); }
+});
+document.addEventListener('keydown', ev=>{ if(ev.key === 'Escape' && state.reportMenuOpen){ state.reportMenuOpen = false; render(); } });
 document.addEventListener('keydown', ev=>{ if(ev.key === 'Escape' && state.themeOpen) setThemeOpen(false); });
 
 init();
