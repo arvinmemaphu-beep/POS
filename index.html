@@ -309,6 +309,8 @@
   .rc-svg{ width:100%; height:auto; display:block; }
   .rc-grid{ stroke:var(--line); stroke-width:1; }
   .rc-bar{ fill:var(--gold); -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  .rc-dim{ opacity:0.4; }
+  .rc-hit{ fill:transparent; cursor:pointer; }
   .rc-txt{ fill:var(--ink-dim); font-size:11px; }
   .rpt-share{ height:6px; background:var(--bg-panel-2); margin-top:6px; }
   .rpt-share > div{ height:100%; background:var(--gold); -webkit-print-color-adjust:exact; print-color-adjust:exact; }
@@ -413,6 +415,7 @@ const state = {
   reportSales: [],
   reportConsign: [],
   reportLoading: false,
+  reportYearTotals: [],   // 12 monthly sales totals for the year of the picked month (Jan..Dec)
   reportMenuOpen: false,  // true while the Report dropdown (Daily / Monthly / History) is open
 };
 
@@ -1955,7 +1958,22 @@ async function fetchReport(){
       const cRes = await fetch(`${state.supaUrl}/rest/v1/consignments?select=*,consignment_items(*)&status=eq.closed&${range('settled_at')}`, { headers: supaHeaders() });
       if(cRes.ok) consign = await cRes.json();
     }catch(e){ /* consignment note is optional */ }
+    let yearTotals = [];
+    try{
+      const ys = encodeURIComponent(new Date(r.y, 0, 1).toISOString()), ye = encodeURIComponent(new Date(r.y + 1, 0, 1).toISOString());
+      const totals = new Array(12).fill(0);
+      for(let from = 0; ; from += step){
+        const yRes = await fetch(`${state.supaUrl}/rest/v1/sales?select=created_at,total&created_at=gte.${ys}&created_at=lt.${ye}&order=created_at.asc`,
+          { headers: Object.assign({}, supaHeaders(), { 'Range-Unit':'items', 'Range': `${from}-${from+step-1}` }) });
+        if(!yRes.ok) throw new Error('year');
+        const rows = await yRes.json();
+        rows.forEach(x=>{ totals[new Date(x.created_at).getMonth()] += Number(x.total) || 0; });
+        if(rows.length < step) break;
+      }
+      yearTotals = totals;
+    }catch(e){ yearTotals = []; } // the year chart is optional
     if(token !== state.reportMonth) return; // month changed while loading
+    state.reportYearTotals = yearTotals;
     state.reportSales = all;
     state.reportConsign = consign;
   }catch(e){
@@ -2023,6 +2041,32 @@ function dailyChartSvg(days, y, m){
   return `<svg class="rc-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Sales per day chart">${g}</svg>`;
 }
 
+// Column chart of sales for each month Jan..Dec of one year; the picked month is highlighted, tap a column to open that month.
+function monthlyChartSvg(totals, y, selM){
+  const W = 640, H = 230, L = 46, R = 8, T = 18, B = 26;
+  const plotW = W - L - R, plotH = H - T - B, slot = plotW / 12, barW = slot * 0.6;
+  const top = niceCeil(Math.max(0, ...totals));
+  let g = '';
+  for(let i = 0; i <= 4; i++){
+    const yy = T + plotH - plotH * i / 4;
+    g += `<line class="rc-grid" x1="${L}" x2="${W-R}" y1="${yy}" y2="${yy}"/><text class="rc-txt" x="${L-6}" y="${yy+4}" text-anchor="end">${compactNum(top * i / 4)}</text>`;
+  }
+  for(let i = 0; i < 12; i++){
+    const v = totals[i] || 0;
+    const cx = L + slot * (i + 0.5);
+    const name = new Date(y, i, 1).toLocaleDateString(undefined, { month:'short' });
+    const key = y + '-' + String(i + 1).padStart(2, '0');
+    if(v > 0){
+      const h = Math.max(2, v / top * plotH);
+      g += `<rect class="rc-bar${i + 1 === selM ? '' : ' rc-dim'}" x="${cx - barW/2}" y="${T + plotH - h}" width="${barW}" height="${h}" rx="1"/>` +
+           `<text class="rc-txt" x="${cx}" y="${T + plotH - h - 4}" text-anchor="middle">${compactNum(v)}</text>`;
+    }
+    g += `<text class="rc-txt" x="${cx}" y="${H - 8}" text-anchor="middle"${i + 1 === selM ? ' style="font-weight:700"' : ''}>${name}</text>` +
+         `<rect class="rc-hit" data-rpt-month="${key}" x="${cx - slot/2}" y="${T}" width="${slot}" height="${plotH + B}"><title>${name} ${y}: ${money(v)}</title></rect>`;
+  }
+  return `<svg class="rc-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Sales by month chart">${g}</svg>`;
+}
+
 function renderReport(){
   const label = reportMonthLabel();
   const r = reportRange();
@@ -2032,8 +2076,13 @@ function renderReport(){
   const prodRows = c.products.slice(0, 15).map(p=>
     `<div class="sale-row"><div class="head"><span>${escapeHtml(p.name)}</span><span class="amt mono">${money(p.revenue)}</span></div><div class="items">${p.qty} sold, ${c.total ? (p.revenue / c.total * 100).toFixed(1) : '0.0'}% of sales</div><div class="rpt-share"><div style="width:${maxRev ? Math.max(2, p.revenue / maxRev * 100) : 0}%"></div></div></div>`
   ).join('');
+  const yearTotal = state.reportYearTotals.reduce((a, b) => a + b, 0);
+  const yearBlock = state.reportYearTotals.length ? `
+    <h2>Sales by month, ${r.y}</h2>
+    <div>${monthlyChartSvg(state.reportYearTotals, r.y, r.m)}</div>
+    <div class="setup-note" style="margin:6px 0 16px;">Year total: ${money(yearTotal)}. Tap a month to open its report.</div>` : '';
   const body = state.reportLoading ? '<div class="empty">Loading report...</div>' :
-    (c.count === 0 ? `<div class="empty">No sales recorded in ${escapeHtml(label)}.</div>` : `
+    (c.count === 0 ? `<div class="empty">No sales recorded in ${escapeHtml(label)}.</div>` + yearBlock : `
     <div class="rpt-stats">
       <div class="rpt-stat"><div class="lbl">Total sales</div><div class="val mono">${money(c.total)}</div></div>
       <div class="rpt-stat"><div class="lbl">Transactions</div><div class="val mono">${c.count}</div></div>
@@ -2043,6 +2092,7 @@ function renderReport(){
     ${c.consignCount ? `<div class="setup-note" style="margin:0 0 14px;">${c.consignCount} consignment${c.consignCount>1?'s':''} settled this month, worth ${money(c.consignValue)}. This is already included in Total sales.</div>` : ''}
     <h2>Sales per day</h2>
     <div style="margin-bottom:16px;">${dailyChartSvg(c.days, r.y, r.m)}</div>
+    ${yearBlock}
     <h2>Top products${c.products.length > 15 ? ' (top 15 of ' + c.products.length + ')' : ''}</h2>
     ${prodRows}`);
   return `<div class="panel">
@@ -2075,6 +2125,10 @@ function exportReportToExcel(){
     ({ Date: new Date(r.y, r.m-1, d).toLocaleDateString(), Sales: c.days[d] }))), 'By Day');
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(c.products.map(p=>
     ({ Product: p.name, 'Qty Sold': p.qty, Revenue: p.revenue }))), 'By Product');
+  if(state.reportYearTotals.length){
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(state.reportYearTotals.map((t, i)=>
+      ({ Month: new Date(r.y, i, 1).toLocaleDateString(undefined, { month:'long' }) + ' ' + r.y, Sales: t }))), 'By Month');
+  }
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(state.reportSales.map(s=>{
     const d = new Date(s.created_at);
     return { Date: d.toLocaleDateString(), Time: d.toLocaleTimeString(),
@@ -2677,6 +2731,7 @@ function render(){
   /* monthly report */
   const rptMonth = document.getElementById('rpt-month');
   if(rptMonth) rptMonth.addEventListener('change', ()=>{ state.reportMonth = rptMonth.value || defaultReportMonth(); fetchReport(); });
+  app.querySelectorAll('[data-rpt-month]').forEach(el=> el.addEventListener('click', ()=>{ state.reportMonth = el.dataset.rptMonth; fetchReport(); }));
   const rptPrev = document.getElementById('btn-rpt-prev');
   if(rptPrev) rptPrev.addEventListener('click', ()=> shiftReportMonth(-1));
   const rptNext = document.getElementById('btn-rpt-next');
