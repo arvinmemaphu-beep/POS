@@ -1895,7 +1895,7 @@ function renderLedger(){
 /* ---------- Monthly sales report ---------- */
 // Consignment sales are already saved as normal sales when a consignment is settled,
 // so this report is built from the sales + sale_items tables and nothing is double counted.
-function canSeeReport(){ return isAdmin() || isViewer(); }
+function canSeeReport(){ return true; } // Report tab is visible to every role
 function defaultReportMonth(){
   const d = new Date();
   return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0');
