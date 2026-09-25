@@ -85,9 +85,17 @@
     flex-wrap: wrap; gap: 10px;
   }
   header.top h1{
-    font-size: 26px; font-weight: 600; margin:0; letter-spacing: 0.2px;
+    font-family: "Inter", -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: 21px; font-weight: 800; margin:0;
+    letter-spacing: 2.5px; text-transform: uppercase;
+    line-height: 1.2;
   }
-  header.top .sub{ color: var(--ink-dim); font-size: 13px; margin-top: 4px; }
+  header.top h1 .brand-gold{ color: var(--gold); }
+  header.top h1 .brand-dim{ color: var(--ink); font-weight: 600; letter-spacing: 2px; }
+  header.top .sub{
+    color: var(--ink-dim); font-size: 10.5px; margin-top: 5px;
+    letter-spacing: 2.8px; text-transform: uppercase; font-weight: 600;
+  }
 
   nav.tabs{ display:flex; flex-wrap: wrap; gap: 6px 8px; justify-content: flex-end; max-width: 100%; }
   nav.tabs button{
@@ -2715,7 +2723,7 @@ function render(){
     '<div class="user-bar"><span class="role-badge">' + escapeHtml(roleLabel()) + '</span><span>' + escapeHtml(state.user && state.user.email ? state.user.email : 'Signed in') + '</span><button class="ghost" id="btn-logout" style="padding:5px 9px;">Sign out</button></div>' : '';
 
   app.innerHTML =
-    '<header class="top"><div style="display:flex;align-items:center;gap:12px;"><img src="CCFACO.png" alt="CCFACO Management System logo" width="52" height="48" style="filter: drop-shadow(0 2px 6px rgba(0,0,0,0.4));"><div><h1 class="serif">CCFACO Management System</h1><div class="sub">Designed by: Arvin B.</div></div></div>' +
+    '<header class="top"><div style="display:flex;align-items:center;gap:14px;"><img src="CCFACO.png" alt="CCFACO Management System logo" width="56" height="52" style="filter: drop-shadow(0 2px 6px rgba(0,0,0,0.4));"><div><h1><span class="brand-gold">CCFACO</span> <span class="brand-dim">Management System</span></h1><div class="sub">Designed by Arvin B.</div></div></div>' +
     '<div class="hdr-right"><div class="hdr-col">' + nav + userBar + '</div>' + themeMarkup() + burger + '</div></header>' +
     scrim +
     body +
