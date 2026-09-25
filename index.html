@@ -309,6 +309,17 @@
   .auth-card{ width:min(100%, 440px); }
   .login-logo{ display:flex; justify-content:center; margin-bottom:14px; }
   .login-logo img{ filter: drop-shadow(0 4px 14px rgba(0,0,0,0.4)); }
+  .login-title{
+    font-family: "Inter", -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: 18px; font-weight: 800; margin:0 0 6px;
+    letter-spacing: 2.5px; text-transform: uppercase; line-height: 1.4;
+  }
+  .login-title .brand-gold{ color: var(--gold); }
+  .login-title .brand-dim{ color: var(--ink); font-weight: 600; letter-spacing: 2px; }
+  .login-sub{
+    font-size: 10.5px; letter-spacing: 2.8px; text-transform: uppercase;
+    font-weight: 600; color: var(--ink-dim); margin-bottom: 4px;
+  }
   .auth-card h2{ color:var(--ink); }
   .auth-error{ color:var(--err-ink); border:1px solid var(--red); padding:10px; margin-top:12px; font-size:13px; line-height:1.45; }
   .user-bar{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; justify-content:flex-end; color:var(--ink-dim); font-size:12px; }
@@ -1822,7 +1833,7 @@ function renderSetup(){
 
 function renderLogin(){
   return '<div class="auth-shell"><div class="panel auth-card">' +
-    '<div class="login-logo"><img src="CCFACO.png" alt="CCFACO Management System logo" width="96" height="90"></div><h2>Sign in to CCFACO Management System</h2>' +
+    '<div class="login-logo"><img src="CCFACO.png" alt="CCFACO Management System logo" width="96" height="90"></div><h2 class="login-title"><span class="brand-gold">CCFACO</span> <span class="brand-dim">Management System</span></h2><div class="login-sub">Sign in to continue</div>' +
     '<div class="setup-note">Gamitin ang email at Password na ibinigay ng Administrator.</div>' +
     '<div class="field" style="margin-top:16px;"><label>Email</label><input id="in-email" type="email" autocomplete="username" placeholder="you@example.com" value="' + escapeHtml(state.loginEmail) + '"></div>' +
     '<div class="field"><label>Password</label><input id="in-password" type="password" autocomplete="current-password" placeholder="Your password"></div>' +
