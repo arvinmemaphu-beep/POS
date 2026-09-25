@@ -353,8 +353,12 @@
     box-shadow:0 8px 24px rgba(0,0,0,0.35); padding:4px 0;
   }
   .nav-group.open .nav-sub{ display:flex; }
-  nav.tabs .nav-sub button{ text-align:left; width:100%; padding:11px 18px; font-size:16px; border-bottom:none; border-left:3px solid transparent; border-radius:0; }
-  nav.tabs .nav-sub button.active{ border-left-color:var(--gold); background:var(--bg-panel-2); }
+  nav.tabs .nav-sub button{ text-align:left; width:100%; padding:11px 18px; font-size:16px; font-weight:500; border-bottom:none; border-left:3px solid transparent; border-radius:0; }
+  nav.tabs .nav-sub button:hover{ color:var(--gold); }
+  nav.tabs .nav-sub button.active{
+    border-left-color:var(--gold); background:var(--bg-panel-2);
+    color:var(--gold); font-weight:700;
+  }
   @media (max-width: 720px){
     .nav-group{ flex-direction:column; align-items:stretch; }
     .nav-sub{ position:static; min-width:0; border:none; box-shadow:none; background:transparent; padding:0; }
@@ -462,6 +466,13 @@ const state = {
   members: [],
   editingMember: null,  // {id, full_name, phone, share_capital} member being edited
   memberSearch: '',
+  productSearch: '',
+  posSearch: '',
+  ledgerSearch: '',
+  dailySearch: '',
+  showProductLogs: false,
+  productLogs: [],
+  productLogsLoading: false,
   discountCol: false,   // true once the products table has a discount column (see Settings SQL)
   saleMemberId: '',      // id of the member picked for THIS sale in the Sell tab; '' = walk-in, no discount
   consignMemberId: '',   // member picked when sending a consignment out; discount applies to it at settle time
@@ -655,6 +666,12 @@ function logout(){
   state.members = [];
   state.editingMember = null;
   state.memberSearch = '';
+  state.productSearch = '';
+  state.posSearch = '';
+  state.ledgerSearch = '';
+  state.dailySearch = '';
+  state.showProductLogs = false;
+  state.productLogs = [];
   state.saleMemberId = '';
   state.consignMemberId = '';
   render();
@@ -867,6 +884,8 @@ async function addProduct(name, price, stock, discount){
       body: JSON.stringify([row])
     });
     if(!res.ok) throw new Error('Insert failed');
+    const discTxt = (state.discountCol && Number(discount) > 0) ? `, discount ${money(Number(discount))}` : '';
+    await logProductAction('add', null, name, `new product: "${name}", price ${money(Number(price))}, stock ${Number(stock)}${discTxt}`);
     await fetchProducts();
     showToast('Product added.');
   }catch(e){
@@ -882,6 +901,8 @@ async function deleteProduct(id){
       method:'DELETE', headers: supaHeaders()
     });
     if(!res.ok) throw new Error('Delete failed');
+    const prod = state.products.find(p=>p.id===id);
+    await logProductAction('delete', id, prod ? prod.name : '(product)', `deleted product${prod ? ': "' + prod.name + '" (had ' + (prod.stock||0) + ' in stock, price ' + money(prod.price) + ')' : ''}`);
     state.products = state.products.filter(p=>p.id!==id);
     render();
   }catch(e){
@@ -1089,6 +1110,58 @@ async function checkout(){
 
 /* ---------- Edit product / Restock ---------- */
 
+/* ---------- Product edit logs ---------- */
+
+async function logProductAction(action, productId, productName, details){
+  try{
+    await fetch(`${state.supaUrl}/rest/v1/product_logs`, {
+      method:'POST', headers: supaHeaders(),
+      body: JSON.stringify({
+        product_id: productId || null,
+        product_name: productName,
+        action,
+        details,
+        changed_by: state.user && state.user.email ? state.user.email : null
+      })
+    });
+  }catch(e){ /* logging failure should never block a product operation */ }
+}
+
+async function fetchProductLogs(){
+  if(!state.connected) return;
+  state.productLogsLoading = true; render();
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/product_logs?select=*&order=created_at.desc&limit=100`, { headers: supaHeaders() });
+    if(!res.ok) throw new Error('Fetch failed');
+    state.productLogs = await res.json();
+  }catch(e){
+    state.productLogs = [];
+    showToast('Could not load product logs. Did you run the product_logs SQL?', true);
+  }
+  state.productLogsLoading = false; render();
+}
+
+const PRODUCT_LOG_LABEL = { add:'Added', edit:'Edited', restock:'Restocked', 'stock-set':'Stock set', delete:'Deleted' };
+
+function renderProductLogs(){
+  if(!state.showProductLogs){
+    return `<div class="panel" style="margin-bottom:14px;"><button class="ghost" id="btn-show-plogs" style="width:100%; padding:11px;">\uD83D\uDCCB Show product history logs</button></div>`;
+  }
+  if(state.productLogsLoading){
+    return `<div class="panel" style="margin-bottom:14px;"><div class="empty">Loading logs...</div></div>`;
+  }
+  const rows = state.productLogs.map(l => {
+    const d = new Date(l.created_at);
+    const lbl = PRODUCT_LOG_LABEL[l.action] || l.action;
+    return `<div class="sale-row"><div class="head"><span><span class="tag">${escapeHtml(lbl)}</span> <strong>${escapeHtml(l.product_name)}</strong></span><span class="amt mono" style="font-size:12px;">${d.toLocaleString()}</span></div><div class="items">${escapeHtml(l.details)}${l.changed_by ? ' \u00B7 by ' + escapeHtml(l.changed_by) : ''}</div></div>`;
+  }).join('') || `<div class="empty">No product changes logged yet.</div>`;
+  return `<div class="panel" style="margin-bottom:14px;">
+    <h2>\uD83D\uDCCB Product history logs <span style="font-weight:400; color:var(--ink-dim);">— last 100 changes</span></h2>
+    ${rows}
+    <button class="ghost" id="btn-hide-plogs" style="width:100%; margin-top:12px;">Hide logs</button>
+  </div>`;
+}
+
 async function updateProduct(id, name, price, discount){
   if(blockViewer()) return;
   if(!name){ showToast('Enter a product name.', true); return; }
@@ -1101,6 +1174,8 @@ async function updateProduct(id, name, price, discount){
     });
     if(!res.ok) throw new Error('Update failed');
     state.editing = null;
+    const discTxt = state.discountCol ? `, discount ${money(Math.max(0, Number(discount) || 0))}` : '';
+    await logProductAction('edit', id, name, `name: "${name}", price: ${money(Number(price))}${discTxt}`);
     await fetchProducts();
     showToast('Product updated.');
   }catch(e){
@@ -1122,6 +1197,7 @@ async function restockProduct(id, addQty){
     });
     if(!res.ok) throw new Error('Restock failed');
     state.restockQty = '';
+    await logProductAction('restock', id, prod.name, `+${add} pieces (${prod.stock||0} \u2192 ${newStock})`);
     await fetchProducts();
     showToast('+' + add + ' ' + prod.name + ' \u2014 ' + newStock + ' in stock now.');
   }catch(e){
@@ -1131,11 +1207,14 @@ async function restockProduct(id, addQty){
 
 async function setStock(id, newStock){
   if(blockViewer()) return;
+  const prod = state.products.find(p=>p.id===id);
+  const old = prod ? (prod.stock||0) : 0;
   const res = await fetch(`${state.supaUrl}/rest/v1/products?id=eq.${id}`, {
     method:'PATCH', headers: supaHeaders(),
     body: JSON.stringify({ stock: Math.max(0, Math.floor(newStock)) })
   });
   if(!res.ok) throw new Error('Could not update stock');
+  await logProductAction('stock-set', id, prod ? prod.name : '(product)', `stock manually set: ${old} \u2192 ${Math.max(0, Math.floor(newStock))}`);
 }
 
 /* ---------- Ledger (Balance Sheet) ---------- */
@@ -1846,7 +1925,9 @@ function renderSettings(){ return renderAdminSettings(); }
 
 function renderPOS(){
   const memberActive = !!state.saleMemberId;
-  const rows = state.products.map(p => {
+  const q = state.posSearch.trim().toLowerCase();
+  const visibleProducts = q ? state.products.filter(p => String(p.name||'').toLowerCase().includes(q)) : state.products;
+  const rows = visibleProducts.map(p => {
     const disc = (state.discountCol && memberActive) ? productDiscount(p.id) : 0;
     const priceHtml = disc > 0
       ? '<span class="strike">' + money(p.price) + '</span> ' + money(discountedUnitPrice(p))
@@ -1860,7 +1941,7 @@ function renderPOS(){
       </div>
       <div class="price mono">${priceHtml}</div>
     </div>`;
-  }).join('') || `<div class="empty">No products yet. Add some in the Products tab.</div>`;
+  }).join('') || (q ? `<div class="empty">No products match your search.</div>` : `<div class="empty">No products yet. Add some in the Products tab.</div>`);
 
   const cartRows = state.cart.map(c => `
     <div class="cart-row">
@@ -1886,6 +1967,7 @@ function renderPOS(){
   <div class="grid">
     <div class="panel">
       <h2>Products</h2>
+      <div class="field"><input id="in-pos-search" placeholder="Search products..." value="${escapeHtml(state.posSearch)}"></div>
       <div class="product-list">${rows}</div>
     </div>
     <div class="panel">
@@ -1924,11 +2006,15 @@ function productDiscountLabel(p){
 }
 
 function renderProducts(){
-  const rows = state.products.map(p =>     '<div class="product-row" data-edit="' + p.id + '" style="' + (isViewer() ? 'cursor:default;' : '') + '">' +
+  const q = state.productSearch.trim().toLowerCase();
+  const visibleProducts = q
+    ? state.products.filter(p => String(p.name||'').toLowerCase().includes(q))
+    : state.products;
+  const rows = visibleProducts.map(p =>     '<div class="product-row" data-edit="' + p.id + '" style="' + (isViewer() ? 'cursor:default;' : '') + '">' +
       '<div><div class="name">' + p.name + '</div><div class="meta"><span class="stock-num' + (p.stock<=5?' stock-low':'') + '">' + p.stock + '</span> in stock' + (state.discountCol ? productDiscountLabel(p) : '') + '</div></div>' +
       '<div style="display:flex; align-items:center; gap:10px;"><div class="price mono">' + (state.discountCol && productDiscount(p.id) > 0 ? '<span class="strike">' + money(p.price) + '</span> ' + money(memberPriceOf(p)) : money(p.price)) + '</div>' +
       (isViewer() ? '' : (isAdmin() ? '<button class="icon-btn" data-del="' + p.id + '" title="Delete">\u2715</button>' : '')) + '</div></div>'
-  ).join('') || '<div class="empty">No products yet.</div>';
+  ).join('') || (q ? '<div class="empty">No products match your search.</div>' : '<div class="empty">No products yet.</div>');
 
   const ed = state.editing;
   const current = ed ? state.products.find(p=>p.id===ed.id) : null;
@@ -1955,7 +2041,9 @@ function renderProducts(){
 
   return '<div class="grid"><div class="panel">' + leftPanel + '</div><div class="panel">' +
     '<h2>All products <span style="font-weight:400; color:var(--ink-dim);">— ' + (isViewer() ? 'view only' : 'tap one to edit or restock') + '</span></h2>' +
-    '<div class="product-list">' + rows + '</div></div></div>';
+    '<div class="field"><input id="in-product-search" placeholder="Search products..." value="' + escapeHtml(state.productSearch) + '"></div>' +
+    '<div class="product-list">' + rows + '</div></div></div>' +
+    '<div id="plogs-slot">' + renderProductLogs() + '</div>';
 }
 
 function renderLedger(){
@@ -1966,7 +2054,12 @@ function renderLedger(){
     </div>`;
   }
 
-  const rows = ledgerWithBalances();
+  const allRows = ledgerWithBalances();
+  const lq = state.ledgerSearch.trim().toLowerCase();
+  const rows = lq ? allRows.filter(e => {
+    const hay = `${e.entry_date||''} ${e.details||''} ${e.qty||''} ${e.pic||''} ${e.balance||''}`.toLowerCase();
+    return hay.includes(lq);
+  }) : allRows;
   const d = state.ledgerDraft;
 
   const addForm = isViewer() ? '' : `
@@ -2004,7 +2097,7 @@ function renderLedger(){
         ${(isAdmin() && state.ledgerDepositCol && Number(e.amount_out) > 0) ? `<button class="icon-btn" data-toggle-deposit="${e.id}" data-deposit-now="${e.is_deposit ? '1' : '0'}" title="${e.is_deposit ? 'Unmark as deposit' : 'Mark as cash deposit (exclude from Expense Report)'}">${e.is_deposit ? '\u2713' : '\u270E'}</button>` : ''}
       </div>
     </div>`;
-  }).join('') || `<div class="empty">No ledger entries yet.</div>`;
+  }).join('') || (lq ? `<div class="empty">No ledger entries match your search.</div>` : `<div class="empty">No ledger entries yet.</div>`);
 
   return `
   <div class="grid">
@@ -2013,9 +2106,10 @@ function renderLedger(){
     </div>
     <div class="panel">
       <h2 style="display:flex; align-items:center; justify-content:space-between;">
-        <span>Ledger</span>
-        <span class="amt mono">${money(currentBalance)}</span>
+        <span>Ledger${lq ? ` <span style="font-weight:400; color:var(--ink-dim); font-size:14px;">(search: ${escapeHtml(state.ledgerSearch)} — balance shown is the last visible entry)</span>` : ''}</span>
+        <span class="amt mono">${money(rows.length ? rows[rows.length-1].balance : currentBalance)}</span>
       </h2>
+      <div class="field"><input id="in-ledger-search" placeholder="Search ledger (details, date, PIC, amount)..." value="${escapeHtml(state.ledgerSearch)}"></div>
       <div class="setup-note" style="margin-bottom:10px;">Awtomatikong pumapasok dito ang bawat Sale (\u201cin\u201d). Manual na idinadagdag ang ibang items \u2014 bills, salary, atbp. Running balance: nakaraang balance + In \u2212 Out.</div>
       ${listRows}
     </div>
@@ -2436,7 +2530,13 @@ function exportReportToExcel(){
 }
 
 function renderHistory(){
-  const rows = state.sales.map(s => {
+  const q = state.dailySearch.trim().toLowerCase();
+  const visibleSales = q ? state.sales.filter(s => {
+    const d = new Date(s.created_at);
+    const itemsStr = (s.sale_items||[]).map(i=>`${i.qty}\u00D7 ${i.product_name}`).join(', ');
+    return itemsStr.toLowerCase().includes(q) || d.toLocaleString().toLowerCase().includes(q) || money(s.total).includes(q);
+  }) : state.sales;
+  const rows = visibleSales.map(s => {
     const d = new Date(s.created_at);
     const itemsStr = (s.sale_items||[]).map(i=>`${i.qty}\u00D7 ${i.product_name}`).join(', ');
     return `
@@ -2447,13 +2547,14 @@ function renderHistory(){
       </div>
       <div class="items">${itemsStr}</div>
     </div>`;
-  }).join('') || `<div class="empty">No sales yet.</div>`;
+  }).join('') || (q ? `<div class="empty">No sales match your search.</div>` : `<div class="empty">No sales yet.</div>`);
 
   return `<div class="panel">
     <h2 style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
       <span>Sales History</span>
       <button class="ghost" id="btn-export-excel" style="padding:7px 12px; white-space:nowrap;">Export to Excel</button>
     </h2>
+    <div class="field"><input id="in-history-search" placeholder="Search sales (product, date, amount)..." value="${escapeHtml(state.dailySearch)}"></div>
     <div class="setup-note" style="margin-bottom:10px;">Ini-export ang LAHAT ng report sa isang Excel file (.xlsx) na may 4 sheets: Sales Summary, Sale Items, Consignments, at Consignment Items \u2014 buong history, hindi lang itong nakikita dito.</div>
     ${rows}
   </div>`;
@@ -2831,6 +2932,28 @@ function render(){
   const checkoutBtn = document.getElementById('btn-checkout');
   if(checkoutBtn) checkoutBtn.addEventListener('click', checkout);
 
+  const posSearchInput = document.getElementById('in-pos-search');
+  if(posSearchInput){
+    posSearchInput.addEventListener('input', ()=>{
+      state.posSearch = posSearchInput.value;
+      const list = app.querySelector('.product-list');
+      if(list){
+        const q = state.posSearch.trim().toLowerCase();
+        let any = false;
+        list.querySelectorAll('.product-row').forEach(r=>{
+          const n = r.querySelector('.name');
+          const show = !q || (n && n.textContent.toLowerCase().includes(q));
+          r.style.display = show ? '' : 'none';
+          if(show) any = true;
+        });
+        let empty = list.querySelector('.empty');
+        if(!any && !empty){
+          empty = document.createElement('div'); empty.className='empty'; empty.textContent='No products match your search.'; list.appendChild(empty);
+        } else if(empty && any){ empty.remove(); }
+      }
+    });
+  }
+
   const saleMemberSelect = document.getElementById('in-sale-member');
   if(saleMemberSelect){
     saleMemberSelect.addEventListener('change', ()=>{
@@ -2930,6 +3053,34 @@ function render(){
       updateMemberList();
     });
   }
+
+  const productSearchInput = document.getElementById('in-product-search');
+  if(productSearchInput){
+    productSearchInput.addEventListener('input', ()=>{
+      state.productSearch = productSearchInput.value;
+      const list = app.querySelector('.product-list');
+      if(list){
+        const q = state.productSearch.trim().toLowerCase();
+        const items = list.querySelectorAll('.product-row .name');
+        let any = false;
+        list.querySelectorAll('.product-row').forEach(r=>{
+          const n = r.querySelector('.name');
+          const show = !q || (n && n.textContent.toLowerCase().includes(q));
+          r.style.display = show ? '' : 'none';
+          if(show) any = true;
+        });
+        let empty = list.querySelector('.empty');
+        if(!any && !empty){
+          empty = document.createElement('div'); empty.className='empty'; empty.textContent='No products match your search.'; list.appendChild(empty);
+        } else if(empty && any){ empty.remove(); }
+      }
+    });
+  }
+
+  const showPlogsBtn = document.getElementById('btn-show-plogs');
+  if(showPlogsBtn){ showPlogsBtn.addEventListener('click', ()=>{ state.showProductLogs = true; fetchProductLogs(); }); }
+  const hidePlogsBtn = document.getElementById('btn-hide-plogs');
+  if(hidePlogsBtn){ hidePlogsBtn.addEventListener('click', ()=>{ state.showProductLogs = false; render(); }); }
   const addMemberBtn = document.getElementById('btn-add-member');
   if(addMemberBtn){
     addMemberBtn.addEventListener('click', async ()=>{
@@ -3035,6 +3186,48 @@ function render(){
 
   const exportExcelBtn = document.getElementById('btn-export-excel');
   if(exportExcelBtn) exportExcelBtn.addEventListener('click', exportHistoryToExcel);
+
+  const historySearchInput = document.getElementById('in-history-search');
+  if(historySearchInput){
+    historySearchInput.addEventListener('input', ()=>{
+      state.dailySearch = historySearchInput.value;
+      const q = state.dailySearch.trim().toLowerCase();
+      const list = historySearchInput.closest('.panel');
+      if(list){
+        let any = false;
+        list.querySelectorAll('.sale-row').forEach(r=>{
+          const show = !q || r.textContent.toLowerCase().includes(q);
+          r.style.display = show ? '' : 'none';
+          if(show) any = true;
+        });
+        let empty = list.querySelector('.empty');
+        if(!any && !empty){
+          empty = document.createElement('div'); empty.className='empty'; empty.textContent='No sales match your search.'; list.appendChild(empty);
+        } else if(empty && any){ empty.remove(); }
+      }
+    });
+  }
+
+  const ledgerSearchInput = document.getElementById('in-ledger-search');
+  if(ledgerSearchInput){
+    ledgerSearchInput.addEventListener('input', ()=>{
+      state.ledgerSearch = ledgerSearchInput.value;
+      const q = state.ledgerSearch.trim().toLowerCase();
+      const list = ledgerSearchInput.closest('.panel');
+      if(list){
+        let any = false;
+        list.querySelectorAll('.sale-row').forEach(r=>{
+          const show = !q || r.textContent.toLowerCase().includes(q);
+          r.style.display = show ? '' : 'none';
+          if(show) any = true;
+        });
+        let empty = list.querySelector('.empty');
+        if(!any && !empty){
+          empty = document.createElement('div'); empty.className='empty'; empty.textContent='No ledger entries match your search.'; list.appendChild(empty);
+        } else if(empty && any){ empty.remove(); }
+      }
+    });
+  }
 
   /* monthly report */
   const rptMonth = document.getElementById('rpt-month');
