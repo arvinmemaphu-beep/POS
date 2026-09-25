@@ -1,4 +1,4 @@
-// CCFACO POS service worker
+// CCFACO Management System service worker
 // Only caches the app shell (HTML/JS/icons) so the app opens instantly and
 // works offline. It NEVER caches Supabase requests — sales/products/members
 // data always comes fresh from the network so nothing goes stale or gets

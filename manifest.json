@@ -1,7 +1,7 @@
 {
-  "name": "CCFACO POS",
-  "short_name": "CCFACO POS",
-  "description": "Point of sale app for CCFACO",
+  "name": "CCFACO Management System",
+  "short_name": "CCFACO MS",
+  "description": "Management system for CCFACO",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
