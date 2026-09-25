@@ -472,6 +472,8 @@ const state = {
   dailySearch: '',
   showProductLogs: false,
   productLogs: [],
+  deductQty: '',
+  consignSearch: '',
   productLogsLoading: false,
   discountCol: false,   // true once the products table has a discount column (see Settings SQL)
   saleMemberId: '',      // id of the member picked for THIS sale in the Sell tab; '' = walk-in, no discount
@@ -670,6 +672,7 @@ function logout(){
   state.posSearch = '';
   state.ledgerSearch = '';
   state.dailySearch = '';
+  state.consignSearch = '';
   state.showProductLogs = false;
   state.productLogs = [];
   state.saleMemberId = '';
@@ -1202,6 +1205,30 @@ async function restockProduct(id, addQty){
     showToast('+' + add + ' ' + prod.name + ' \u2014 ' + newStock + ' in stock now.');
   }catch(e){
     showToast('Could not restock: ' + e.message, true);
+  }
+}
+
+async function deductProduct(id, deductQty){
+  if(blockViewer()) return;
+  const prod = state.products.find(p=>p.id===id);
+  if(!prod) return;
+  const rem = Math.floor(Number(deductQty));
+  if(!rem || rem <= 0){ showToast('Enter how many pieces to remove.', true); return; }
+  const cur = prod.stock||0;
+  if(rem > cur){ showToast('Cannot remove ' + rem + ' — only ' + cur + ' in stock.', true); return; }
+  try{
+    const newStock = cur - rem;
+    const res = await fetch(`${state.supaUrl}/rest/v1/products?id=eq.${id}`, {
+      method:'PATCH', headers: supaHeaders(),
+      body: JSON.stringify({ stock: newStock })
+    });
+    if(!res.ok) throw new Error('Deduct failed');
+    state.deductQty = '';
+    await logProductAction('stock-set', id, prod.name, `-${rem} pieces (inventory correction: ${cur} \u2192 ${newStock})`);
+    await fetchProducts();
+    showToast('-' + rem + ' ' + prod.name + ' \u2014 ' + newStock + ' in stock now.');
+  }catch(e){
+    showToast('Could not deduct stock: ' + e.message, true);
   }
 }
 
@@ -2027,10 +2054,12 @@ function renderProducts(){
       (state.discountCol ? '<div class="field"><label>Discount (₱ off per piece)</label><input id="ep-disc" type="number" min="0" step="0.01" placeholder="0" value="' + (ed.discount || 0) + '"></div>' : '') +
       '<button class="primary" id="btn-save-product">Save changes</button>' +
       '<div style="border-top:1px solid var(--line); margin:18px 0 14px;"></div>' +
-      '<h2>Restock</h2>' +
+      '<h2>Adjust stock</h2>' +
       '<div class="meta" style="font-size:12px; color:var(--ink-dim); margin-bottom:10px;">Current stock: <span class="mono">' + (current ? current.stock : 0) + '</span>. Stock goes down automatically on every sale.</div>' +
       '<div class="row2"><div class="field"><label>Add pieces</label><input id="rs-qty" type="number" min="1" step="1" placeholder="0" value="' + state.restockQty + '"></div>' +
       '<div class="field"><label>&nbsp;</label><button class="ghost" id="btn-restock" style="width:100%; padding:9px;">Add to stock</button></div></div>' +
+      '<div class="row2"><div class="field"><label>Remove pieces (inventory correction)</label><input id="rd-qty" type="number" min="1" step="1" placeholder="0" value="' + (state.deductQty || '') + '"></div>' +
+      '<div class="field"><label>&nbsp;</label><button class="ghost" id="btn-deduct" style="width:100%; padding:9px;">Deduct from stock</button></div></div>' +
       '<button class="ghost" id="btn-cancel-edit" style="width:100%;">Done</button>' :
       '<h2>Add a product</h2>' +
       '<div class="field"><label>Name</label><input id="np-name" placeholder="e.g. Band shirt"></div>' +
@@ -2635,6 +2664,13 @@ function renderConsign(){
     const items = c.consignment_items || [];
     const dt = new Date(c.created_at);
     const open = c.status !== 'closed';
+    // search filter: consignee, product names, member name, note
+    if(state.consignSearch.trim()){
+      const cq = state.consignSearch.trim().toLowerCase();
+      const linkedForSearch = c.member_id ? state.members.find(m=>m.id===c.member_id) : null;
+      const hay = `${c.consignee||''} ${c.note||''} ${linkedForSearch ? linkedForSearch.full_name : ''} ${items.map(i=>i.product_name||'').join(' ')}`.toLowerCase();
+      if(!hay.includes(cq)) return '';
+    }
     const sent = items.reduce((s,i)=> s + (i.qty_sent||0), 0);
     const sold = items.reduce((s,i)=> s + (i.qty_sold||0), 0);
     const ret = items.reduce((s,i)=> s + (i.qty_returned||0), 0);
@@ -2696,7 +2732,7 @@ function renderConsign(){
       ${itemRows}
       ${open ? `<button class="primary" data-settle="${c.id}" ${state.busy?'disabled':''}>${state.busy ? 'Saving...' : 'Record sold / returned'}</button>` : ''}
     </div>`;
-  }).join('') || `<div class="empty">No consignments yet.</div>`;
+  }).join('') || (state.consignSearch.trim() ? `<div class="empty">No consignments match your search.</div>` : `<div class="empty">No consignments yet.</div>`);
 
   return `
   <div class="grid">
@@ -2748,6 +2784,7 @@ function renderConsign(){
     </div>
     <div class="panel">
       <h2>Consignment history</h2>
+      <div class="field"><input id="in-consign-search" placeholder="Search consignee, product, member..." value="${escapeHtml(state.consignSearch)}"></div>
       <div>${history}</div>
     </div>
   </div>`;
@@ -3077,6 +3114,13 @@ function render(){
     });
   }
 
+  const deductBtn = document.getElementById('btn-deduct');
+  if(deductBtn){
+    deductBtn.addEventListener('click', ()=>{
+      deductProduct(state.editing.id, document.getElementById('rd-qty').value);
+    });
+  }
+
   const showPlogsBtn = document.getElementById('btn-show-plogs');
   if(showPlogsBtn){ showPlogsBtn.addEventListener('click', ()=>{ state.showProductLogs = true; fetchProductLogs(); }); }
   const hidePlogsBtn = document.getElementById('btn-hide-plogs');
@@ -3186,6 +3230,27 @@ function render(){
 
   const exportExcelBtn = document.getElementById('btn-export-excel');
   if(exportExcelBtn) exportExcelBtn.addEventListener('click', exportHistoryToExcel);
+
+  const consignSearchInput = document.getElementById('in-consign-search');
+  if(consignSearchInput){
+    consignSearchInput.addEventListener('input', ()=>{
+      state.consignSearch = consignSearchInput.value;
+      const q = state.consignSearch.trim().toLowerCase();
+      const list = consignSearchInput.closest('.panel');
+      if(list){
+        let any = false;
+        list.querySelectorAll('.sale-row').forEach(r=>{
+          const show = !q || r.textContent.toLowerCase().includes(q);
+          r.style.display = show ? '' : 'none';
+          if(show) any = true;
+        });
+        let empty = list.querySelector('.empty');
+        if(!any && !empty){
+          empty = document.createElement('div'); empty.className='empty'; empty.textContent='No consignments match your search.'; list.appendChild(empty);
+        } else if(empty && any){ empty.remove(); }
+      }
+    });
+  }
 
   const historySearchInput = document.getElementById('in-history-search');
   if(historySearchInput){
