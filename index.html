@@ -1931,7 +1931,7 @@ function renderLedger(){
         <div class="field"><label>In (\u20B1)</label><input id="lg-in" type="number" step="0.01" placeholder="0" value="${d.in}"></div>
         <div class="field"><label>Out (\u20B1)</label><input id="lg-out" type="number" step="0.01" placeholder="0" value="${d.out}"></div>
       </div>
-      ${state.ledgerDepositCol ? `<label style="display:flex; align-items:center; gap:10px; margin:8px 0 14px; padding:10px 12px; border-radius:10px; background:var(--gold); color:var(--on-accent); font-weight:700; font-size:14px; cursor:pointer;"><input id="lg-deposit" type="checkbox" ${d.deposit ? 'checked' : ''} style="width:22px; height:22px; accent-color:var(--on-accent); flex-shrink:0;"> CASH DEPOSIT &mdash; i click ito kung for deposit sa bangko</label>` : ''}
+      ${state.ledgerDepositCol ? `<label style="display:flex; align-items:center; gap:10px; margin:8px 0 14px; padding:10px 12px; border-radius:10px; background:#FFD8A8; color:#7A3E00; font-weight:700; font-size:14px; cursor:pointer;"><input id="lg-deposit" type="checkbox" ${d.deposit ? 'checked' : ''} style="width:22px; height:22px; accent-color:#7A3E00; flex-shrink:0;"> CASH DEPOSIT &mdash; i click ito kung for deposit sa bangko</label>` : ''}
       <button class="primary" id="btn-add-ledger">Add to ledger</button>
     </div>`;
 
