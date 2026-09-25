@@ -1138,6 +1138,23 @@ async function addLedgerEntry(){
   }
 }
 
+// Admin-only: retroactively mark/unmark a past Out entry as a cash deposit
+// (a transfer, not an expense) so it drops out of the Expense Report.
+async function toggleLedgerDeposit(id, makeDeposit){
+  if(!isAdmin()) return;
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/ledger_entries?id=eq.${id}`, {
+      method:'PATCH', headers: supaHeaders(),
+      body: JSON.stringify({ is_deposit: makeDeposit })
+    });
+    if(!res.ok) throw new Error('Could not update entry');
+    await fetchLedger();
+    showToast(makeDeposit ? 'Marked as cash deposit.' : 'Unmarked as deposit.');
+  }catch(e){
+    showToast('Could not update entry: ' + e.message, true);
+  }
+}
+
 // Posts one auto-generated "in" entry to the ledger for a completed sale.
 // Silently skipped if the ledger table hasn't been set up yet (see Settings SQL).
 async function postSaleToLedger(saleId, total, itemsSummary){
@@ -1741,7 +1758,7 @@ create policy "staff can write ledger" on ledger_entries for all to authenticate
 
       <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
         <h2>Ledger: cash deposits</h2>
-        <div class="setup-note">I-run ito nang isang beses para may "Cash deposit" checkbox sa Add entry form ng Ledger. Kapag chinek ito sa isang Out entry (hal. cash na dinala sa bangko), mananatili pa rin ito sa Ledger balance pero HINDI na isasama sa Expense Report &mdash; dahil transfer lang ito ng pera, hindi gastos.</div>
+        <div class="setup-note">I-run ito nang isang beses para may "CASH DEPOSIT" checkbox sa Add entry form ng Ledger. Kapag chinek ito sa isang Out entry (hal. cash na dinala sa bangko), mananatili pa rin ito sa Ledger balance pero HINDI na isasama sa Expense Report &mdash; dahil transfer lang ito ng pera, hindi gastos. Para sa mga LUMANG entry na dati nang naidagdag bilang expense: pumunta sa Ledger tab, Admin lang ang makakakita ng \u270E button sa tabi ng bawat Out entry &mdash; i-tap iyon para markahan (o i-unmark) na deposit.</div>
         <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">alter table ledger_entries add column if not exists is_deposit boolean not null default false;</code>
       </div>
     </div>
@@ -1914,7 +1931,7 @@ function renderLedger(){
         <div class="field"><label>In (\u20B1)</label><input id="lg-in" type="number" step="0.01" placeholder="0" value="${d.in}"></div>
         <div class="field"><label>Out (\u20B1)</label><input id="lg-out" type="number" step="0.01" placeholder="0" value="${d.out}"></div>
       </div>
-      ${state.ledgerDepositCol ? `<label style="display:flex; align-items:center; gap:8px; margin:6px 0 12px; font-size:13px;"><input id="lg-deposit" type="checkbox" ${d.deposit ? 'checked' : ''}> Cash deposit (transfer lang, hindi expense &mdash; hindi isasama sa Expense Report)</label>` : ''}
+      ${state.ledgerDepositCol ? `<label style="display:flex; align-items:center; gap:10px; margin:8px 0 14px; padding:10px 12px; border-radius:10px; background:var(--gold); color:var(--on-accent); font-weight:700; font-size:14px; cursor:pointer;"><input id="lg-deposit" type="checkbox" ${d.deposit ? 'checked' : ''} style="width:22px; height:22px; accent-color:var(--on-accent); flex-shrink:0;"> CASH DEPOSIT &mdash; hindi ito expense, huwag isama sa Expense Report</label>` : ''}
       <button class="primary" id="btn-add-ledger">Add to ledger</button>
     </div>`;
 
@@ -1930,6 +1947,7 @@ function renderLedger(){
       </div>
       <div class="items" style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
         <span>${escapeHtml(e.details)}${Number(e.amount_in)>0 ? ' \u00B7 <span style="color:var(--pos);">+' + money(e.amount_in) + '</span>' : ''}${Number(e.amount_out)>0 ? ' \u00B7 <span style="color:var(--neg);">-' + money(e.amount_out) + '</span>' : ''}</span>
+        ${(isAdmin() && state.ledgerDepositCol && Number(e.amount_out) > 0) ? `<button class="icon-btn" data-toggle-deposit="${e.id}" data-deposit-now="${e.is_deposit ? '1' : '0'}" title="${e.is_deposit ? 'Unmark as deposit' : 'Mark as cash deposit (exclude from Expense Report)'}">${e.is_deposit ? '\u2713' : '\u270E'}</button>` : ''}
       </div>
     </div>`;
   }).join('') || `<div class="empty">No ledger entries yet.</div>`;
@@ -2840,6 +2858,14 @@ function render(){
   }
   const cancelSaleItemBtn = document.getElementById('btn-cancel-sale-item');
   if(cancelSaleItemBtn) cancelSaleItemBtn.addEventListener('click', ()=>{ state.editingSaleItem = null; render(); });
+
+  /* ledger: mark/unmark a past entry as a cash deposit (Admin-only) */
+  app.querySelectorAll('[data-toggle-deposit]').forEach(b=>{
+    b.addEventListener('click', ()=>{
+      if(!isAdmin()) return;
+      toggleLedgerDeposit(b.dataset.toggleDeposit, b.dataset.depositNow !== '1');
+    });
+  });
 
   /* members */
   wireMemberRows();
