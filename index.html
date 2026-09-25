@@ -417,8 +417,9 @@ const state = {
   editingSaleItem: null,  // {id, product_name} sale_items row being name-corrected, Admin-only
   editingConsignItem: null, // {id, product_name} consignment_items row being name-corrected, Admin-only
   ledgerReady: false,     // true once the ledger_entries table exists (see Settings SQL)
+  ledgerDepositCol: false, // true once ledger_entries has an is_deposit column (see Settings SQL)
   ledgerEntries: [],
-  ledgerDraft: { date: '', qty: '', details: '', pic: '', in: '', out: '' },
+  ledgerDraft: { date: '', qty: '', details: '', pic: '', in: '', out: '', deposit: false },
   themeOpen: false,       // true while the color theme popover is open
   reportMonth: '',        // 'YYYY-MM' picked in the Report tab
   reportSales: [],
@@ -534,7 +535,7 @@ async function restoreAuth(){
     await fetchCurrentUser();
     await loadProfile();
     const ok = await testConnection();
-    if(ok){ await checkDiscountColumn(); await checkConsignMemberColumn(); await checkLedgerReady(); await fetchProducts(); await fetchMembers(); }
+    if(ok){ await checkDiscountColumn(); await checkConsignMemberColumn(); await checkLedgerReady(); await checkLedgerDepositColumn(); await fetchProducts(); await fetchMembers(); }
     return ok;
   }catch(e){
     clearSession();
@@ -568,6 +569,7 @@ async function login(email, password){
     await checkDiscountColumn();
     await checkConsignMemberColumn();
     await checkLedgerReady();
+    await checkLedgerDepositColumn();
     state.tab = 'pos';
     await fetchProducts();
     await fetchMembers();
@@ -863,6 +865,16 @@ async function checkLedgerReady(){
   }
 }
 
+// Detect once whether the ledger_entries table has an is_deposit column (see Settings SQL)
+async function checkLedgerDepositColumn(){
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/ledger_entries?select=is_deposit&limit=1`, { headers: supaHeaders() });
+    state.ledgerDepositCol = res.ok;
+  }catch(e){
+    state.ledgerDepositCol = false;
+  }
+}
+
 function addToCart(product){
   if(blockViewer()) return;
   const existing = state.cart.find(c=>c.id===product.id);
@@ -1111,13 +1123,14 @@ async function addLedgerEntry(){
     amount_out: Number(d.out) || 0,
     source: 'manual'
   };
+  if(state.ledgerDepositCol) row.is_deposit = !!d.deposit;
   try{
     const res = await fetch(`${state.supaUrl}/rest/v1/ledger_entries`, {
       method:'POST', headers: supaHeaders(),
       body: JSON.stringify([row])
     });
     if(!res.ok) throw new Error('Could not save entry');
-    state.ledgerDraft = { date: '', qty: '', details: '', pic: '', in: '', out: '' };
+    state.ledgerDraft = { date: '', qty: '', details: '', pic: '', in: '', out: '', deposit: false };
     await fetchLedger();
     showToast('Ledger entry added.');
   }catch(e){
@@ -1725,6 +1738,12 @@ drop policy if exists "staff can write ledger" on ledger_entries;
 create policy "authenticated can read ledger" on ledger_entries for select to authenticated using (true);
 create policy "staff can write ledger" on ledger_entries for all to authenticated using (public.current_user_role() in ('admin','cashier')) with check (public.current_user_role() in ('admin','cashier'));</code>
       </div>
+
+      <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
+        <h2>Ledger: cash deposits</h2>
+        <div class="setup-note">I-run ito nang isang beses para may "Cash deposit" checkbox sa Add entry form ng Ledger. Kapag chinek ito sa isang Out entry (hal. cash na dinala sa bangko), mananatili pa rin ito sa Ledger balance pero HINDI na isasama sa Expense Report &mdash; dahil transfer lang ito ng pera, hindi gastos.</div>
+        <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">alter table ledger_entries add column if not exists is_deposit boolean not null default false;</code>
+      </div>
     </div>
   </div>`;
 }
@@ -1895,6 +1914,7 @@ function renderLedger(){
         <div class="field"><label>In (\u20B1)</label><input id="lg-in" type="number" step="0.01" placeholder="0" value="${d.in}"></div>
         <div class="field"><label>Out (\u20B1)</label><input id="lg-out" type="number" step="0.01" placeholder="0" value="${d.out}"></div>
       </div>
+      ${state.ledgerDepositCol ? `<label style="display:flex; align-items:center; gap:8px; margin:6px 0 12px; font-size:13px;"><input id="lg-deposit" type="checkbox" ${d.deposit ? 'checked' : ''}> Cash deposit (transfer lang, hindi expense &mdash; hindi isasama sa Expense Report)</label>` : ''}
       <button class="primary" id="btn-add-ledger">Add to ledger</button>
     </div>`;
 
@@ -1905,7 +1925,7 @@ function renderLedger(){
     return `
     <div class="sale-row">
       <div class="head">
-        <span>${escapeHtml(dateLabel)}${e.qty ? ' \u00B7 ' + escapeHtml(e.qty) : ''}${e.pic ? ' \u00B7 ' + escapeHtml(e.pic) : ''}${e.source === 'sale' ? ' <span class="tag closed">Sale</span>' : ''}</span>
+        <span>${escapeHtml(dateLabel)}${e.qty ? ' \u00B7 ' + escapeHtml(e.qty) : ''}${e.pic ? ' \u00B7 ' + escapeHtml(e.pic) : ''}${e.source === 'sale' ? ' <span class="tag closed">Sale</span>' : ''}${e.is_deposit ? ' <span class="tag">Deposit</span>' : ''}</span>
         <span class="amt mono">${money(e.balance)}</span>
       </div>
       <div class="items" style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
@@ -1965,7 +1985,8 @@ async function loadSalesYear(y){
   }
   return { year: y, months, days };
 }
-// Every ledger entry that has an Out amount (all time); the reports filter by month/year in the browser.
+// Every ledger entry that has an Out amount (all time), excluding cash deposits (see Settings SQL);
+// the reports filter by month/year in the browser.
 async function loadExpenseEntries(){
   const all = [], step = 1000;
   for(let from = 0; ; from += step){
@@ -1976,7 +1997,7 @@ async function loadExpenseEntries(){
     all.push(...rows);
     if(rows.length < step) break;
   }
-  return all;
+  return all.filter(e => !e.is_deposit);
 }
 function shiftReportMonth(delta){
   const r = reportRange();
@@ -2963,6 +2984,8 @@ function render(){
   if(lgIn) lgIn.addEventListener('input', ()=>{ state.ledgerDraft.in = lgIn.value; });
   const lgOut = document.getElementById('lg-out');
   if(lgOut) lgOut.addEventListener('input', ()=>{ state.ledgerDraft.out = lgOut.value; });
+  const lgDeposit = document.getElementById('lg-deposit');
+  if(lgDeposit) lgDeposit.addEventListener('change', ()=>{ state.ledgerDraft.deposit = lgDeposit.checked; });
   const addLedgerBtn = document.getElementById('btn-add-ledger');
   if(addLedgerBtn) addLedgerBtn.addEventListener('click', addLedgerEntry);
 }
