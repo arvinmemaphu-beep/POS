@@ -475,7 +475,7 @@ const state = {
   busy: false,
   menuOpen: false,
   members: [],
-  editingMember: null,  // {id, full_name, phone, share_capital} member being edited
+  editingMember: null,  // {id, full_name, phone} member being edited
   memberSearch: '',
   productSearch: '',
   posSearch: '',
@@ -1519,21 +1519,28 @@ async function fetchMembers(){
   if(!state.connected) return;
   state.loading = true; render();
   try{
-    const res = await fetch(`${state.supaUrl}/rest/v1/members?select=*&order=full_name.asc`, { headers: supaHeaders() });
-    if(!res.ok) throw new Error('Failed to load members. If the members table does not exist yet, run the Members SQL in Settings first.');
-    state.members = await res.json();
+    const all = [];
+    const PAGE = 1000;
+    for(let offset = 0; ; offset += PAGE){
+      const res = await fetch(`${state.supaUrl}/rest/v1/members?select=*&order=full_name.asc,id.asc&limit=${PAGE}&offset=${offset}`, { headers: supaHeaders() });
+      if(!res.ok) throw new Error('Failed to load members. If the members table does not exist yet, run the Members SQL in Settings first.');
+      const batch = await res.json();
+      all.push(...batch);
+      if(batch.length < PAGE) break;
+    }
+    state.members = all;
   }catch(e){
     showToast('Could not load members: ' + e.message, true);
   }
   state.loading = false; render();
 }
 
-async function addMember(fullName, phone, shareCapital){
+async function addMember(fullName, phone){
   if(blockViewer()) return;
   try{
     const res = await fetch(`${state.supaUrl}/rest/v1/members`, {
       method:'POST', headers: supaHeaders(),
-      body: JSON.stringify([{ full_name: fullName, phone: phone || null, share_capital: Number(shareCapital || 0) }])
+      body: JSON.stringify([{ full_name: fullName, phone: phone || null }])
     });
     if(!res.ok){
       const errBody = await res.json().catch(()=>({}));
@@ -1546,13 +1553,13 @@ async function addMember(fullName, phone, shareCapital){
   }
 }
 
-async function updateMember(id, fullName, phone, shareCapital){
+async function updateMember(id, fullName, phone){
   if(blockViewer()) return;
   if(!fullName){ showToast('Enter the member name.', true); return; }
   try{
     const res = await fetch(`${state.supaUrl}/rest/v1/members?id=eq.${id}`, {
       method:'PATCH', headers: supaHeaders(),
-      body: JSON.stringify({ full_name: fullName, phone: phone || null, share_capital: Number(shareCapital || 0) })
+      body: JSON.stringify({ full_name: fullName, phone: phone || null })
     });
     if(!res.ok){
       const errBody = await res.json().catch(()=>({}));
@@ -1580,6 +1587,107 @@ async function deleteMember(id){
   }
 }
 
+/* Excel / CSV import of members */
+function normName(n){ return String(n||'').replace(/\s+/g,' ').trim().toLowerCase(); }
+function cleanCell(v){ return String(v == null ? '' : v).replace(/\s+/g,' ').trim(); }
+function cleanPhone(v){
+  if(v == null || v === '') return '';
+  if(typeof v === 'number'){
+    let t = String(Math.round(v));
+    if(/^9\d{9}$/.test(t)) t = '0' + t; // Excel drops the leading 0 of 09xx numbers
+    return t;
+  }
+  return cleanCell(v);
+}
+function parseMemberRows(rows){
+  // rows: array of arrays. Returns [{name, phone}]
+  const isHdr = c => /name|pangalan|member|miyembro|phone|contact|mobile|cell/i.test(cleanCell(c));
+  let hdrIdx = -1;
+  for(let i = 0; i < Math.min(rows.length, 10); i++){
+    if((rows[i]||[]).some(isHdr)){ hdrIdx = i; break; }
+  }
+  let nameCol = 0, phoneCol = -1, firstCol = -1, lastCol = -1, start = 0;
+  if(hdrIdx >= 0){
+    start = hdrIdx + 1;
+    const h = rows[hdrIdx].map(c => cleanCell(c).toLowerCase());
+    const find = re => h.findIndex(x => re.test(x));
+    firstCol = find(/first/); lastCol = find(/last|surname|apelyido/);
+    nameCol = find(/full.?name|^name|member|pangalan|miyembro/);
+    if(nameCol < 0) nameCol = find(/name/);
+    if(nameCol >= 0 && (nameCol === firstCol || nameCol === lastCol)) nameCol = -1;
+    phoneCol = find(/phone|contact|mobile|cell|tel|cp/);
+    if(phoneCol < 0) phoneCol = h.findIndex((x, i) => /number/.test(x) && i !== nameCol && i !== firstCol && i !== lastCol);
+    if(nameCol < 0 && firstCol < 0 && lastCol < 0) nameCol = 0;
+  }else{
+    phoneCol = 1;
+  }
+  const out = [];
+  for(let i = start; i < rows.length; i++){
+    const r = rows[i] || [];
+    let name = '';
+    if(nameCol >= 0) name = cleanCell(r[nameCol]);
+    if(!name && (firstCol >= 0 || lastCol >= 0)){
+      name = [firstCol >= 0 ? cleanCell(r[firstCol]) : '', lastCol >= 0 ? cleanCell(r[lastCol]) : ''].filter(Boolean).join(' ');
+    }
+    if(!name) continue;
+    out.push({ name, phone: phoneCol >= 0 ? cleanPhone(r[phoneCol]) : '' });
+  }
+  return out;
+}
+async function importMembersFile(file){
+  if(blockViewer() || !file) return;
+  try{
+    showToast('Binabasa ang file...');
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, { type: 'array' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: true });
+    const parsed = parseMemberRows(rows);
+    if(!parsed.length){ showToast('Walang nakitang pangalan sa file.', true); return; }
+
+    const seen = new Set(state.members.map(m => normName(m.full_name)));
+    const fresh = [];
+    let dupes = 0;
+    parsed.forEach(r => {
+      const k = normName(r.name);
+      if(seen.has(k)){ dupes++; return; }
+      seen.add(k);
+      fresh.push({ full_name: r.name, phone: r.phone || null });
+    });
+    if(!fresh.length){ showToast('Lahat ng pangalan sa file ay nasa listahan na (' + dupes + ' skipped).', true); return; }
+    if(!confirm('Mag-import ng ' + fresh.length + ' bagong members' + (dupes ? ' (' + dupes + ' skipped dahil nasa listahan na)' : '') + '?')) return;
+
+    state.busy = true;
+    for(let i = 0; i < fresh.length; i += 500){
+      const res = await fetch(`${state.supaUrl}/rest/v1/members`, {
+        method: 'POST',
+        headers: Object.assign({}, supaHeaders(), { 'Prefer': 'return=minimal' }),
+        body: JSON.stringify(fresh.slice(i, i + 500))
+      });
+      if(!res.ok){
+        const errBody = await res.json().catch(()=>({}));
+        throw new Error((errBody.message || errBody.hint || 'Insert failed (' + res.status + ')') + (i ? ' — ' + i + ' members ang na-save na bago ito.' : ''));
+      }
+    }
+    state.busy = false;
+    await fetchMembers();
+    showToast('Na-import: ' + fresh.length + ' members' + (dupes ? ' (' + dupes + ' skipped)' : '') + '. Total: ' + state.members.length);
+  }catch(e){
+    state.busy = false;
+    await fetchMembers();
+    showToast('Import failed: ' + e.message, true);
+  }
+}
+function downloadMemberTemplate(){
+  const ws = XLSX.utils.json_to_sheet([
+    { 'Full name': 'Juan Dela Cruz', 'Contact number': '09171234567' },
+    { 'Full name': 'Maria Santos', 'Contact number': '' }
+  ]);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Members');
+  XLSX.writeFile(wb, 'CCFACO-Members-Template.xlsx');
+}
+
 function filteredMembers(){
   const q = state.memberSearch.trim().toLowerCase();
   if(!q) return state.members;
@@ -1591,8 +1699,15 @@ function filteredMembers(){
 function memberRowHtml(m){
   return '<div class="product-row" data-medit="' + m.id + '">' +
     '<div><div class="name">' + escapeHtml(m.full_name) + '</div><div class="meta">' + (m.phone ? escapeHtml(m.phone) : 'No contact number') + '</div></div>' +
-    '<div style="display:flex; align-items:center; gap:10px;"><div class="price mono">' + money(m.share_capital||0) + '</div>' +
+    '<div style="display:flex; align-items:center; gap:10px;">' +
     (isViewer() ? '' : '<button class="icon-btn" data-mdel="' + m.id + '" title="Delete">✕</button>') + '</div></div>';
+}
+
+function memberCountHtml(){
+  const total = state.members.length;
+  const q = state.memberSearch.trim();
+  if(q) return 'Showing <strong style="color:var(--ink);">' + filteredMembers().length + '</strong> of ' + total + ' members';
+  return 'Total members: <strong style="color:var(--gold); font-size:18px;">' + total + '</strong>';
 }
 
 function memberRowsHtml(){
@@ -1607,7 +1722,7 @@ function wireMemberRows(){
       if(blockViewer()) return;
       if(ev.target.hasAttribute('data-mdel')) return;
       const m = state.members.find(x=>x.id===r.dataset.medit);
-      if(m){ state.editingMember = { id: m.id, full_name: m.full_name, phone: m.phone, share_capital: m.share_capital }; render(); }
+      if(m){ state.editingMember = { id: m.id, full_name: m.full_name, phone: m.phone }; render(); }
     });
   });
   app.querySelectorAll('[data-mdel]').forEach(b=>{
@@ -1619,6 +1734,8 @@ function updateMemberList(){
   const listEl = document.getElementById('member-list');
   if(!listEl) return;
   listEl.innerHTML = memberRowsHtml();
+  const countEl = document.getElementById('member-count');
+  if(countEl) countEl.innerHTML = memberCountHtml();
   wireMemberRows();
 }
 
@@ -1630,18 +1747,22 @@ function renderMembers(){
       '<h2>Edit ' + escapeHtml(em.full_name) + '</h2>' +
       '<div class="field"><label>Full name</label><input id="em-name" value="' + escapeHtml(em.full_name) + '"></div>' +
       '<div class="field"><label>Contact number</label><input id="em-phone" value="' + escapeHtml(em.phone || '') + '"></div>' +
-      '<div class="field"><label>Share capital</label><input id="em-cap" type="number" step="0.01" value="' + (em.share_capital || 0) + '"></div>' +
       '<button class="primary" id="btn-save-member">Save changes</button>' +
       '<div style="border-top:1px solid var(--line); margin:18px 0 14px;"></div>' +
       '<button class="ghost" id="btn-cancel-member" style="width:100%;">Done</button>' :
       '<h2>Add a member</h2>' +
       '<div class="field"><label>Full name</label><input id="nm-name" placeholder="e.g. Juan Dela Cruz"></div>' +
       '<div class="field"><label>Contact number</label><input id="nm-phone" placeholder="e.g. 0917 123 4567"></div>' +
-      '<div class="field"><label>Share capital</label><input id="nm-cap" type="number" step="0.01" placeholder="0.00"></div>' +
-      '<button class="primary" id="btn-add-member">Add member</button>');
+      '<button class="primary" id="btn-add-member">Add member</button>' +
+      '<div style="border-top:1px solid var(--line); margin:18px 0 14px;"></div>' +
+      '<h2>Upload member list (Excel)</h2>' +
+      '<div class="setup-note">Pumili ng Excel (.xlsx / .xls) o CSV file. Kukunin ang column na may <strong>Name</strong> at (kung meron) <strong>Contact / Phone</strong>. Kapag walang header, column A = pangalan, column B = contact. Ang mga pangalang nasa listahan na ay hindi na idadagdag ulit.</div>' +
+      '<input id="in-member-file" type="file" accept=".xlsx,.xls,.csv" style="margin-top:10px;">' +
+      '<button class="ghost" id="btn-member-template" style="width:100%; margin-top:10px;">Download sample Excel</button>');
 
   return '<div class="grid"><div class="panel">' + leftPanel + '</div><div class="panel">' +
     '<h2>All members <span style="font-weight:400; color:var(--ink-dim);">— ' + (isViewer() ? 'view only' : 'tap one to edit') + '</span></h2>' +
+    '<div id="member-count" style="margin:-4px 0 10px; font-size:14px; color:var(--ink-dim);">' + memberCountHtml() + '</div>' +
     '<div class="field"><input id="in-member-search" placeholder="Search name or contact number..." value="' + escapeHtml(state.memberSearch) + '"></div>' +
     '<div class="product-list" id="member-list">' + memberRowsHtml() + '</div></div></div>';
 }
@@ -3162,17 +3283,25 @@ function render(){
     addMemberBtn.addEventListener('click', async ()=>{
       const name = document.getElementById('nm-name').value.trim();
       const phone = document.getElementById('nm-phone').value.trim();
-      const cap = document.getElementById('nm-cap').value || 0;
       if(!name){ showToast('Enter the member name.', true); return; }
-      await addMember(name, phone, cap);
+      await addMember(name, phone);
     });
   }
   const saveMemberBtn = document.getElementById('btn-save-member');
   if(saveMemberBtn){
     saveMemberBtn.addEventListener('click', ()=>{
-      updateMember(state.editingMember.id, document.getElementById('em-name').value.trim(), document.getElementById('em-phone').value.trim(), document.getElementById('em-cap').value);
+      updateMember(state.editingMember.id, document.getElementById('em-name').value.trim(), document.getElementById('em-phone').value.trim());
     });
   }
+  const memberFileInput = document.getElementById('in-member-file');
+  if(memberFileInput){
+    memberFileInput.addEventListener('change', ()=>{
+      const f = memberFileInput.files && memberFileInput.files[0];
+      if(f) importMembersFile(f);
+    });
+  }
+  const memberTplBtn = document.getElementById('btn-member-template');
+  if(memberTplBtn) memberTplBtn.addEventListener('click', downloadMemberTemplate);
   const cancelMemberBtn = document.getElementById('btn-cancel-member');
   if(cancelMemberBtn) cancelMemberBtn.addEventListener('click', ()=>{ state.editingMember = null; render(); });
 
