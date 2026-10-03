@@ -638,6 +638,7 @@ async function login(email, password){
     await checkLedgerReady();
     await checkLedgerDepositColumn();
     state.tab = 'pos';
+    navStack.length = 0;
     await fetchProducts();
     await fetchMembers();
     welcome = 'Signed in as ' + roleLabel() + '.';
@@ -662,6 +663,7 @@ function logout(){
   state.role = null;
   state.connected = false;
   state.tab = 'pos';
+  navStack.length = 0;
   state.cart = [];
   state.tendered = '';
   state.authError = '';
@@ -688,7 +690,7 @@ function blockViewer(){
   return false;
 }
 
-function switchTab(tab){
+function switchTab(tab, fromBack){
   if(tab === 'settings' && !isAdmin()){
     showToast('Settings is available to Admin only.', true);
     return;
@@ -696,6 +698,10 @@ function switchTab(tab){
   if(tab === 'report' && !canSeeReport()){
     showToast('The report is available to Admin and Regular users only.', true);
     return;
+  }
+  if(!fromBack && tab !== state.tab){
+    navStack.push(state.tab);
+    if(navStack.length > 30) navStack.shift();
   }
   state.tab = tab;
   state.menuOpen = false;
@@ -3339,6 +3345,51 @@ document.addEventListener('click', ev=>{
 });
 document.addEventListener('keydown', ev=>{ if(ev.key === 'Escape' && state.reportMenuOpen){ state.reportMenuOpen = false; render(); } });
 document.addEventListener('keydown', ev=>{ if(ev.key === 'Escape' && state.themeOpen) setThemeOpen(false); });
+
+// ===== Mobile Back button =====
+// Back closes popups first, then returns to the previous tab, and only
+// leaves the app when pressed twice on the main tab.
+const navStack = [];
+let lastBackAt = 0;
+function pushGuard(){ try{ history.pushState({ccfaco:1}, ''); }catch(e){} }
+function closeTopOverlay(){
+  if(state.themeOpen){ setThemeOpen(false); return true; }
+  if(state.menuOpen){ state.menuOpen = false; render(); return true; }
+  if(state.reportMenuOpen){ state.reportMenuOpen = false; render(); return true; }
+  if(state.editingSaleItem){ state.editingSaleItem = null; render(); return true; }
+  if(state.editingConsignItem){ state.editingConsignItem = null; render(); return true; }
+  if(state.editingMember){ state.editingMember = null; render(); return true; }
+  if(state.editing){ state.editing = null; render(); return true; }
+  if(state.showProductLogs){ state.showProductLogs = false; render(); return true; }
+  return false;
+}
+try{ history.replaceState({ccfaco:0}, ''); }catch(e){}
+pushGuard();
+window.addEventListener('popstate', ()=>{
+  // We just landed on the base entry; decide what Back should do.
+  if(Date.now() - lastBackAt < 2000 && lastBackAt){
+    // second Back on the main tab -> really leave
+    lastBackAt = 0;
+    history.back();
+    return;
+  }
+  if(closeTopOverlay()){ pushGuard(); return; }
+  if(navStack.length){
+    const prev = navStack.pop();
+    switchTab(prev, true);
+    pushGuard();
+    return;
+  }
+  const home = isViewer() ? state.tab : 'pos';
+  if(state.connected && state.tab !== home){
+    switchTab(home, true);
+    pushGuard();
+    return;
+  }
+  lastBackAt = Date.now();
+  showToast('Pindot ulit ang Back para lumabas');
+  pushGuard();
+});
 
 init();
 
