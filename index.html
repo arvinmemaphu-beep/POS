@@ -508,6 +508,7 @@ const state = {
   expenseLoading: false,
   salesYear: null,        // {year, months:[12 sales totals], days:{'M-D': total}} for the year of the picked month
   reportMenuOpen: false,  // true while the Report dropdown (Daily / Monthly / History) is open
+  lastBackup: '',         // ISO time of the last backup downloaded from this device
 };
 
 function el(html){
@@ -812,6 +813,82 @@ async function updateConsignItemName(id, name){
 // downloadable .xlsx with a per-sale summary sheet and a per-product detail sheet.
 // Pulls the FULL history from Supabase (not just what's shown on screen) and builds ONE
 // downloadable .xlsx with everything: Sales, Sale Items, Consignments, and Consignment Items.
+// Reads EVERY row of a table (Supabase returns at most 1000 rows per request, so page through it).
+async function fetchAllRows(table, query){
+  const PAGE = 1000, all = [];
+  for(let off = 0; ; off += PAGE){
+    const res = await fetch(`${state.supaUrl}/rest/v1/${table}?${query}&limit=${PAGE}&offset=${off}`, { headers: supaHeaders() });
+    if(!res.ok){
+      const e = await res.json().catch(()=>({}));
+      throw new Error(e.message || ('HTTP ' + res.status));
+    }
+    const batch = await res.json();
+    all.push(...batch);
+    if(batch.length < PAGE) break;
+  }
+  return all;
+}
+
+// Full backup (Admin only): one .xlsx with a sheet for every table.
+async function backupToExcel(){
+  if(!state.connected) return;
+  if(!isAdmin()){ showToast('Admin lang ang puwedeng mag-backup.', true); return; }
+  const btn = document.getElementById('btn-backup');
+  if(btn){ btn.disabled = true; btn.textContent = 'Gumagawa ng backup...'; }
+  try{
+    const plan = [
+      ['Products', 'products', 'select=*&order=id.asc'],
+      ['Members', 'members', 'select=*&order=id.asc'],
+      ['Sales', 'sales', 'select=*&order=id.asc'],
+      ['Sale Items', 'sale_items', 'select=*&order=id.asc'],
+      ['Consignments', 'consignments', 'select=*&order=id.asc'],
+      ['Consignment Items', 'consignment_items', 'select=*&order=id.asc'],
+      ['Ledger', 'ledger_entries', 'select=*&order=id.asc'],
+      ['Product Logs', 'product_logs', 'select=*&order=id.asc'],
+      ['Users', 'profiles', 'select=*']
+    ];
+    const flat = rows => rows.map(r => {
+      const o = {};
+      Object.keys(r).forEach(k => { const v = r[k]; o[k] = (v !== null && typeof v === 'object') ? JSON.stringify(v) : v; });
+      return o;
+    });
+    const wb = XLSX.utils.book_new();
+    const summary = [];
+    const stamp = new Date();
+    const sheets = [];
+    for(const [label, table, q] of plan){
+      try{
+        const rows = await fetchAllRows(table, q);
+        summary.push({ Sheet: label, Rows: rows.length, Status: 'OK' });
+        sheets.push([label, sheetOrEmpty(flat(rows), 'Walang laman')]);
+      }catch(e){
+        summary.push({ Sheet: label, Rows: 0, Status: 'Skipped: ' + e.message });
+      }
+    }
+    summary.unshift({ Sheet: 'Backup made', Rows: '', Status: stamp.toLocaleString() });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summary), 'Summary');
+    sheets.forEach(([label, ws]) => XLSX.utils.book_append_sheet(wb, ws, label));
+    const y = stamp.getFullYear(), m = String(stamp.getMonth()+1).padStart(2,'0'), d = String(stamp.getDate()).padStart(2,'0');
+    XLSX.writeFile(wb, `CCFACO-Backup-${y}-${m}-${d}.xlsx`);
+    try{ localStorage.setItem('ccfaco_last_backup', stamp.toISOString()); }catch(e){}
+    const failed = summary.filter(x => /^Skipped/.test(x.Status)).length;
+    state.lastBackup = stamp.toISOString();
+    showToast(failed ? 'Backup downloaded (may na-skip na ' + failed + ' table — tingnan ang Summary sheet).' : 'Backup downloaded.');
+  }catch(e){
+    showToast('Backup failed: ' + e.message, true);
+  }
+  if(btn){ btn.disabled = false; btn.textContent = 'Download backup (Excel)'; }
+}
+
+function lastBackupText(){
+  let iso = state.lastBackup;
+  if(!iso){ try{ iso = localStorage.getItem('ccfaco_last_backup'); }catch(e){} }
+  if(!iso) return 'Wala pang backup sa device na ito.';
+  const d = new Date(iso);
+  const days = Math.floor((Date.now() - d.getTime()) / 86400000);
+  return 'Huling backup (sa device na ito): ' + d.toLocaleDateString() + (days > 0 ? ' — ' + days + ' araw na ang nakalipas' : ' — ngayon');
+}
+
 function sheetOrEmpty(rows, emptyNote){
   return XLSX.utils.json_to_sheet(rows.length ? rows : [{ Note: emptyNote }]);
 }
@@ -820,14 +897,10 @@ async function exportHistoryToExcel(){
   const btn = document.getElementById('btn-export-excel');
   if(btn){ btn.disabled = true; btn.textContent = 'Exporting...'; }
   try{
-    const [salesRes, consignRes] = await Promise.all([
-      fetch(`${state.supaUrl}/rest/v1/sales?select=*,sale_items(product_name,price,qty)&order=created_at.desc`, { headers: supaHeaders() }),
-      fetch(`${state.supaUrl}/rest/v1/consignments?select=*,consignment_items(*)&order=created_at.desc`, { headers: supaHeaders() })
+    const [sales, consignments] = await Promise.all([
+      fetchAllRows('sales', 'select=*,sale_items(product_name,price,qty)&order=created_at.desc,id.asc'),
+      fetchAllRows('consignments', 'select=*,consignment_items(*)&order=created_at.desc,id.asc')
     ]);
-    if(!salesRes.ok) throw new Error('Failed to load sales');
-    if(!consignRes.ok) throw new Error('Failed to load consignments');
-    const sales = await salesRes.json();
-    const consignments = await consignRes.json();
     if(sales.length === 0 && consignments.length === 0){ showToast('Wala pang data na i-eexport.', true); return; }
 
     const salesSummary = sales.map(s => {
@@ -1904,6 +1977,12 @@ function userRowsHtml(){
 
 function renderAdminSettings(){
   return `
+  <div class="panel" style="max-width:520px; margin-bottom:16px;">
+    <h2>Backup</h2>
+    <div class="setup-note">I-download ang kopya ng LAHAT ng data sa isang Excel file: Products, Members, Sales, Sale Items, Consignments, Consignment Items, Ledger, Product Logs, at Users. Gawin ito paminsan-minsan (halimbawa, linggu-linggo) at itago ang file sa Google Drive o i-email sa sarili.</div>
+    <button class="primary" id="btn-backup" style="width:auto; padding:9px 18px; margin-top:10px;">Download backup (Excel)</button>
+    <div style="margin-top:10px; font-size:13px; color:var(--ink-dim);">${lastBackupText()}</div>
+  </div>
   <div class="panel" style="max-width:520px;">
     <h2>Manage users</h2>
     <div class="setup-note">I-run ito nang isang beses (kailangan muna gumagana ang User access roles sa ibaba) para makapag-add ka ng user dito mismo sa app, at para makita ang listahan ng mga user:</div>
@@ -3428,6 +3507,8 @@ function render(){
   const cancelConsignItemBtn = document.getElementById('btn-cancel-consign-item');
   if(cancelConsignItemBtn) cancelConsignItemBtn.addEventListener('click', ()=>{ state.editingConsignItem = null; render(); });
 
+  const backupBtn = document.getElementById('btn-backup');
+  if(backupBtn) backupBtn.addEventListener('click', backupToExcel);
   const exportExcelBtn = document.getElementById('btn-export-excel');
   if(exportExcelBtn) exportExcelBtn.addEventListener('click', exportHistoryToExcel);
 
