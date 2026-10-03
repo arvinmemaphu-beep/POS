@@ -1575,6 +1575,8 @@ async function updateMember(id, fullName, phone){
 
 async function deleteMember(id){
   if(blockViewer()) return;
+  const who = state.members.find(m => m.id === id);
+  if(!confirm('Sigurado ka bang buburahin si ' + (who ? who.full_name : 'member na ito') + '? Hindi na ito maibabalik.')) return;
   try{
     const res = await fetch(`${state.supaUrl}/rest/v1/members?id=eq.${id}`, {
       method:'DELETE', headers: supaHeaders()
@@ -1601,37 +1603,70 @@ function cleanPhone(v){
 }
 function parseMemberRows(rows){
   // rows: array of arrays. Returns [{name, phone}]
-  const isHdr = c => /name|pangalan|member|miyembro|phone|contact|mobile|cell/i.test(cleanCell(c));
-  let hdrIdx = -1;
-  for(let i = 0; i < Math.min(rows.length, 10); i++){
-    if((rows[i]||[]).some(isHdr)){ hdrIdx = i; break; }
+  rows = (rows || []).map(r => Array.isArray(r) ? r : []);
+  const KW = /name|pangalan|member|miyembro|phone|contact|mobile|cell|\bcp\b|\btel/i;
+  // header row = the row (in the first 12) with the most keyword cells
+  let hdrIdx = -1, best = 0;
+  for(let i = 0; i < Math.min(rows.length, 12); i++){
+    const sc = rows[i].filter(c => typeof c === 'string' && KW.test(c)).length;
+    if(sc > best){ best = sc; hdrIdx = i; }
   }
-  let nameCol = 0, phoneCol = -1, firstCol = -1, lastCol = -1, start = 0;
+  const start = hdrIdx >= 0 ? hdrIdx + 1 : 0;
+  const data = rows.slice(start);
+  const width = Math.max(0, ...rows.map(r => r.length));
+
+  // column statistics from the actual data
+  const isPhoneLike = v => (typeof v === 'number' && v >= 1000000) || (typeof v === 'string' && /^\+?[\d\s\-().]{7,}$/.test(v.trim()));
+  const stats = [];
+  for(let c = 0; c < width; c++){
+    let alpha = 0, phone = 0, filled = 0;
+    data.forEach(r => {
+      const v = r[c];
+      if(v === '' || v == null) return;
+      filled++;
+      if(typeof v === 'string' && /[A-Za-z\u00C0-\u024F]/.test(v)) alpha++;
+      if(isPhoneLike(v)) phone++;
+    });
+    stats.push({ alpha, phone, filled });
+  }
+  const bestBy = (key, skip) => {
+    let idx = -1, max = 0;
+    stats.forEach((st, c) => { if(skip.includes(c)) return; if(st[key] > max){ max = st[key]; idx = c; } });
+    return idx;
+  };
+  const textual = c => c >= 0 && stats[c] && stats[c].filled > 0 && stats[c].alpha / stats[c].filled >= 0.5;
+
+  let nameCol = -1, phoneCol = -1, firstCol = -1, lastCol = -1;
   if(hdrIdx >= 0){
-    start = hdrIdx + 1;
     const h = rows[hdrIdx].map(c => cleanCell(c).toLowerCase());
-    const find = re => h.findIndex(x => re.test(x));
-    firstCol = find(/first/); lastCol = find(/last|surname|apelyido/);
-    nameCol = find(/full.?name|^name|member|pangalan|miyembro/);
-    if(nameCol < 0) nameCol = find(/name/);
-    if(nameCol >= 0 && (nameCol === firstCol || nameCol === lastCol)) nameCol = -1;
-    phoneCol = find(/phone|contact|mobile|cell|tel|cp/);
-    if(phoneCol < 0) phoneCol = h.findIndex((x, i) => /number/.test(x) && i !== nameCol && i !== firstCol && i !== lastCol);
-    if(nameCol < 0 && firstCol < 0 && lastCol < 0) nameCol = 0;
-  }else{
-    phoneCol = 1;
+    const find = (re, not) => h.findIndex(x => re.test(x) && !(not && not.test(x)));
+    firstCol = find(/first|given/);
+    lastCol  = find(/last|surname|apelyido/);
+    nameCol  = find(/full.?name|^names?\b|name of|pangalan/, /last|first|middle/);
+    if(nameCol < 0) nameCol = find(/member|miyembro|name/, /\bid\b|\bno\b|number|code|last|first|middle/);
+    phoneCol = find(/phone|contact|mobile|cell|\bcp\b|\btel/);
+    if(phoneCol < 0) phoneCol = find(/number/, /\bid\b/);
+    if(phoneCol === nameCol) phoneCol = -1;
   }
+  // verify the header-picked name column really holds names; otherwise pick by content
+  const haveSplit = firstCol >= 0 || lastCol >= 0;
+  if(!haveSplit){
+    if(!textual(nameCol)) nameCol = bestBy('alpha', []);
+  }
+  if(phoneCol < 0 || stats[phoneCol] && stats[phoneCol].phone === 0 && stats[phoneCol].filled > 0 && stats[phoneCol].alpha > 0){
+    phoneCol = bestBy('phone', [nameCol, firstCol, lastCol]);
+  }
+  if(nameCol < 0 && !haveSplit) return [];
+
   const out = [];
-  for(let i = start; i < rows.length; i++){
-    const r = rows[i] || [];
-    let name = '';
-    if(nameCol >= 0) name = cleanCell(r[nameCol]);
-    if(!name && (firstCol >= 0 || lastCol >= 0)){
+  data.forEach(r => {
+    let name = nameCol >= 0 ? cleanCell(r[nameCol]) : '';
+    if(haveSplit && (!name || nameCol < 0)){
       name = [firstCol >= 0 ? cleanCell(r[firstCol]) : '', lastCol >= 0 ? cleanCell(r[lastCol]) : ''].filter(Boolean).join(' ');
     }
-    if(!name) continue;
+    if(!name || !/[A-Za-z\u00C0-\u024F]/.test(name)) return;   // skip blank / number-only rows
     out.push({ name, phone: phoneCol >= 0 ? cleanPhone(r[phoneCol]) : '' });
-  }
+  });
   return out;
 }
 async function importMembersFile(file){
@@ -1640,9 +1675,12 @@ async function importMembersFile(file){
     showToast('Binabasa ang file...');
     const buf = await file.arrayBuffer();
     const wb = XLSX.read(buf, { type: 'array' });
-    const ws = wb.Sheets[wb.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: true });
-    const parsed = parseMemberRows(rows);
+    let parsed = [];
+    for(const sn of wb.SheetNames){
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[sn], { header: 1, defval: '', raw: true });
+      parsed = parseMemberRows(rows);
+      if(parsed.length) break;
+    }
     if(!parsed.length){ showToast('Walang nakitang pangalan sa file.', true); return; }
 
     const seen = new Set(state.members.map(m => normName(m.full_name)));
@@ -1655,7 +1693,8 @@ async function importMembersFile(file){
       fresh.push({ full_name: r.name, phone: r.phone || null });
     });
     if(!fresh.length){ showToast('Lahat ng pangalan sa file ay nasa listahan na (' + dupes + ' skipped).', true); return; }
-    if(!confirm('Mag-import ng ' + fresh.length + ' bagong members' + (dupes ? ' (' + dupes + ' skipped dahil nasa listahan na)' : '') + '?')) return;
+    const sample = fresh.slice(0, 3).map(m => '• ' + m.full_name + (m.phone ? ' — ' + m.phone : '')).join('\n');
+    if(!confirm('Mag-import ng ' + fresh.length + ' bagong members' + (dupes ? ' (' + dupes + ' skipped dahil nasa listahan na)' : '') + '?\n\nHalimbawa:\n' + sample + '\n\nKung mali ang pangalan/contact, pindutin ang Cancel.')) return;
 
     state.busy = true;
     for(let i = 0; i < fresh.length; i += 500){
