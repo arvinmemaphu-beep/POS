@@ -278,6 +278,17 @@
   input:focus{ outline:none; border-color: var(--gold-dim); }
   label{ font-size:12px; color: var(--ink-dim); display:block; margin-bottom:4px; }
   .field{ margin-bottom:12px; }
+  .pw-wrap{ position:relative; }
+  .pw-wrap input{ width:100%; padding-right:46px; }
+  .pw-eye{
+    position:absolute; top:50%; right:4px; transform:translateY(-50%);
+    width:40px; height:36px; padding:0; margin:0;
+    display:flex; align-items:center; justify-content:center;
+    background:transparent; border:none; border-radius:8px;
+    color: var(--ink-dim); cursor:pointer; box-shadow:none;
+  }
+  .pw-eye:hover, .pw-eye.on{ color: var(--gold); }
+  .pw-eye svg{ width:22px; height:22px; display:block; }
   .row2{ display:flex; gap:10px; }
   .row2 .field{ flex:1; }
 
@@ -1943,12 +1954,14 @@ function renderSetup(){
   '</div></div>';
 }
 
+const EYE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+const EYE_OFF_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.94 10.94 0 0 1 12 20C5 20 1 12 1 12a18.5 18.5 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12A3 3 0 1 1 9.88 9.88"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
 function renderLogin(){
   return '<div class="auth-shell"><div class="panel auth-card">' +
     '<div class="login-logo"><img src="CCFACO.png" alt="CCFACO Management System logo" width="96" height="90"></div><h2 class="login-title"><span class="brand-gold">CCFACO</span> <span class="brand-dim">Management System</span></h2><div class="login-sub">Sign in to continue</div>' +
     '<div class="setup-note">Gamitin ang email at Password na ibinigay ng Administrator.</div>' +
     '<div class="field" style="margin-top:16px;"><label>Email</label><input id="in-email" type="email" autocomplete="username" placeholder="you@example.com" value="' + escapeHtml(state.loginEmail) + '"></div>' +
-    '<div class="field"><label>Password</label><input id="in-password" type="password" autocomplete="current-password" placeholder="Your password"></div>' +
+    '<div class="field"><label>Password</label><div class="pw-wrap"><input id="in-password" type="password" autocomplete="current-password" placeholder="Your password"><button type="button" class="pw-eye" id="btn-pw-eye" aria-label="Show password" title="Show password">' + EYE_ICON + '</button></div></div>' +
     '<button class="primary" id="btn-login">' + (state.authLoading ? 'Signing in...' : 'Sign in') + '</button>' +
     (state.authError ? '<div class="auth-error">' + escapeHtml(state.authError) + '</div>' : '') +
   '</div></div>';
@@ -2950,6 +2963,19 @@ function render(){
   const emailInput = document.getElementById('in-email');
   if(emailInput) emailInput.addEventListener('keydown', ev=>{ if(ev.key === 'Enter') document.getElementById('in-password').focus(); });
   const passwordInput = document.getElementById('in-password');
+  const pwEye = document.getElementById('btn-pw-eye');
+  if(pwEye && passwordInput){
+    pwEye.addEventListener('click', ()=>{
+      const show = passwordInput.type === 'password';
+      passwordInput.type = show ? 'text' : 'password';
+      pwEye.innerHTML = show ? EYE_OFF_ICON : EYE_ICON;
+      pwEye.classList.toggle('on', show);
+      const label = show ? 'Hide password' : 'Show password';
+      pwEye.setAttribute('aria-label', label);
+      pwEye.title = label;
+      passwordInput.focus();
+    });
+  }
   if(passwordInput) passwordInput.addEventListener('keydown', ev=>{ if(ev.key === 'Enter') loginBtn.click(); });
 
   const logoutBtn = document.getElementById('btn-logout');
