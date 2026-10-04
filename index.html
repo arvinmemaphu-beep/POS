@@ -1207,16 +1207,19 @@ async function checkout(){
 
 async function logProductAction(action, productId, productName, details){
   try{
-    await fetch(`${state.supaUrl}/rest/v1/product_logs`, {
+    const send = (act) => fetch(`${state.supaUrl}/rest/v1/product_logs`, {
       method:'POST', headers: supaHeaders(),
       body: JSON.stringify({
         product_id: productId || null,
         product_name: productName,
-        action,
+        action: act,
         details,
         changed_by: state.user && state.user.email ? state.user.email : null
       })
     });
+    const res = await send(action);
+    // if the database only allows the older action names, fall back so the log is never lost
+    if(!res.ok && String(action).indexOf('consign-') === 0) await send('stock-set');
   }catch(e){ /* logging failure should never block a product operation */ }
 }
 
@@ -1234,7 +1237,7 @@ async function fetchProductLogs(){
   state.productLogsLoading = false; render();
 }
 
-const PRODUCT_LOG_LABEL = { add:'Added', edit:'Edited', restock:'Restocked', 'stock-set':'Stock set', delete:'Deleted' };
+const PRODUCT_LOG_LABEL = { add:'Added', edit:'Edited', restock:'Restocked', 'stock-set':'Stock set', 'consign-sent':'Consignment - sent', 'consign-return':'Consignment return', delete:'Deleted' };
 
 function renderProductLogs(){
   if(!state.showProductLogs){
@@ -1322,7 +1325,7 @@ async function deductProduct(id, deductQty){
   }
 }
 
-async function setStock(id, newStock){
+async function setStock(id, newStock, note, action){
   if(blockViewer()) return;
   const prod = state.products.find(p=>p.id===id);
   const old = prod ? (prod.stock||0) : 0;
@@ -1331,7 +1334,7 @@ async function setStock(id, newStock){
     body: JSON.stringify({ stock: Math.max(0, Math.floor(newStock)) })
   });
   if(!res.ok) throw new Error('Could not update stock');
-  await logProductAction('stock-set', id, prod ? prod.name : '(product)', `stock manually set: ${old} \u2192 ${Math.max(0, Math.floor(newStock))}`);
+  await logProductAction(action || 'stock-set', id, prod ? prod.name : '(product)', `${note || 'stock manually set'}: ${old} \u2192 ${Math.max(0, Math.floor(newStock))}`);
 }
 
 /* ---------- Ledger (Balance Sheet) ---------- */
@@ -1495,7 +1498,7 @@ async function sendConsignment(){
     // items leave the shop, so take them out of stock
     for(const d of state.consignDraft){
       const prod = state.products.find(p=>p.id===d.product_id);
-      if(prod) await setStock(d.product_id, (prod.stock||0) - d.qty);
+      if(prod) await setStock(d.product_id, (prod.stock||0) - d.qty, 'consignment sent to ' + consignee + ' (-' + d.qty + ')', 'consign-sent');
     }
 
     state.consignDraft = [];
@@ -1566,7 +1569,7 @@ async function settleConsignment(consignment){
       // returned pieces go back to shop stock
       if(r.ret > 0){
         const prod = state.products.find(p=>p.id===r.it.product_id);
-        if(prod) await setStock(r.it.product_id, (prod.stock||0) + r.ret);
+        if(prod) await setStock(r.it.product_id, (prod.stock||0) + r.ret, 'consignment return from ' + (consignment.consignee || 'consignee') + ' (+' + r.ret + ')', 'consign-return');
       }
     }
 
