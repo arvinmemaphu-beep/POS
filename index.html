@@ -498,6 +498,8 @@ const state = {
   deductQty: '',
   consignSearch: '',
   productLogsLoading: false,
+  userDraft: { name:'', role:'cashier', email:'', password:'' }, // Add-user form values, kept so a failed attempt does not wipe what was typed
+  pwPrompt: null,       // {cur, next, confirm, busy} while the Change password popup is open
   freeCol: false,       // true once sale_items has is_free + free_remarks columns (see Settings SQL)
   freePrompt: null,     // {id, qty, remarks} while the Freebie remarks popup is open
   discountCol: false,   // true once the products table has a discount column (see Settings SQL)
@@ -1969,6 +1971,23 @@ async function fetchAppUsers(){
   render();
 }
 
+// Turn Supabase's error replies into something the admin can act on
+function friendlyAuthError(payload, fallback){
+  const code = String((payload && (payload.error_code || payload.code)) || '').toLowerCase();
+  const raw = String((payload && (payload.msg || payload.message || payload.error_description || payload.error)) || '');
+  const low = raw.toLowerCase();
+  if(code.indexOf('rate_limit') >= 0 || low.indexOf('rate limit') >= 0 || low.indexOf('security purposes') >= 0)
+    return 'Na-limit ng Supabase ang pagpapadala ng email (kaunti lang kada oras). I-off ang "Confirm email" sa Supabase (Authentication \u2192 Sign In / Providers \u2192 Email), o maghintay ng mga 1 oras at ulitin.';
+  if(code === 'signup_disabled' || low.indexOf('signups not allowed') >= 0 || low.indexOf('signup is disabled') >= 0 || low.indexOf('signups are disabled') >= 0)
+    return 'Naka-off ang Email signups sa Supabase. I-on ang "Allow new users to sign up" (Authentication \u2192 Sign In / Providers), o gumawa ng user sa Authentication \u2192 Users \u2192 Add user.';
+  if(code === 'user_already_exists' || low.indexOf('already registered') >= 0 || low.indexOf('already been registered') >= 0)
+    return 'Naka-register na ang email na ito.';
+  if(code.indexOf('weak_password') >= 0 || low.indexOf('password should') >= 0 || low.indexOf('weak') >= 0)
+    return 'Masyadong mahina ang password. Gumamit ng mas mahaba (6+ characters, mas maganda kung may numero).';
+  if(low.indexOf('invalid') >= 0 && low.indexOf('email') >= 0) return 'Hindi valid ang email address.';
+  return raw || fallback;
+}
+
 async function createUser(email, password, fullName, role){
   if(!isAdmin()) return false;
   if(!email || !password){ showToast('Enter an email and password.', true); return false; }
@@ -1981,8 +2000,11 @@ async function createUser(email, password, fullName, role){
       body: JSON.stringify({ email, password })
     });
     const payload = await signupRes.json().catch(()=>({}));
-    if(!signupRes.ok) throw new Error(payload.error_description || payload.msg || payload.error || 'Could not create the account.');
-    const newUserId = (payload.user && payload.user.id) || payload.id;
+    if(!signupRes.ok) throw new Error(friendlyAuthError(payload, 'Could not create the account (error ' + signupRes.status + ').'));
+    const newUser = payload.user || payload;
+    // With "Confirm email" on, Supabase hides duplicates by returning a user with no identities
+    if(newUser && Array.isArray(newUser.identities) && newUser.identities.length === 0) throw new Error('Naka-register na ang email na ito.');
+    const newUserId = newUser && newUser.id;
     if(!newUserId) throw new Error('Account created, but no user id came back. Check Supabase Authentication to confirm.');
     const profRes = await fetch(`${state.supaUrl}/rest/v1/profiles`, {
       method:'POST', headers: supaHeaders(),
@@ -1990,9 +2012,14 @@ async function createUser(email, password, fullName, role){
     });
     if(!profRes.ok){
       const errBody = await profRes.json().catch(()=>({}));
-      throw new Error(errBody.message || errBody.hint || 'Account created, but could not save the role. Add it in the profiles table manually.');
+      const m = String(errBody.message || '');
+      if(profRes.status === 401 || profRes.status === 403 || m.toLowerCase().indexOf('row-level security') >= 0)
+        throw new Error('Nagawa ang account pero hindi ma-save ang role: i-run ang "Manage users" SQL sa ibaba (Settings), tapos itakda ang role ng user.');
+      throw new Error('Nagawa ang account pero hindi ma-save ang role (' + (m || errBody.hint || profRes.status) + ').');
     }
-    showToast('User added as ' + roleDisplay(role) + '.');
+    state.userDraft = { name:'', role:'cashier', email:'', password:'' };
+    const needsConfirm = !payload.access_token && !(payload.session && payload.session.access_token);
+    showToast('User added as ' + roleDisplay(role) + '.' + (needsConfirm ? ' Kailangan niyang i-confirm ang email bago makapag-login.' : ''));
     await fetchAppUsers();
     return true;
   }catch(e){
@@ -2001,6 +2028,65 @@ async function createUser(email, password, fullName, role){
   }finally{
     state.userBusy = false; render();
   }
+}
+
+/* ---------- Change own password ---------- */
+function openPwPrompt(){
+  if(!state.connected) return;
+  state.pwPrompt = { cur:'', next:'', confirm:'', busy:false, focus:true };
+  render();
+}
+async function changeOwnPassword(){
+  const pp = state.pwPrompt;
+  if(!pp || pp.busy) return;
+  const email = state.user && state.user.email;
+  if(!email){ showToast('Hindi makita ang email ng account. Mag-sign out at mag-sign in ulit.', true); return; }
+  if(!pp.cur){ showToast('Ilagay ang kasalukuyang password.', true); return; }
+  if(pp.next.length < 6){ showToast('Ang bagong password ay dapat 6 characters pataas.', true); return; }
+  if(pp.next !== pp.confirm){ showToast('Hindi magkapareho ang bagong password at ang confirm.', true); return; }
+  if(pp.next === pp.cur){ showToast('Dapat iba ang bagong password sa luma.', true); return; }
+  pp.busy = true; render();
+  try{
+    // Re-sign in with the current password: it proves the person knows it, and gives a fresh session (Supabase may require one)
+    const loginRes = await fetch(state.supaUrl + '/auth/v1/token?grant_type=password', {
+      method:'POST', headers:{ 'apikey': state.supaKey, 'Content-Type':'application/json' },
+      body: JSON.stringify({ email, password: pp.cur })
+    });
+    const loginPayload = await loginRes.json().catch(()=>({}));
+    if(!loginRes.ok) throw new Error('Mali ang kasalukuyang password.');
+    state.session = loginPayload; await saveSession();
+    const res = await fetch(state.supaUrl + '/auth/v1/user', {
+      method:'PUT',
+      headers:{ 'apikey': state.supaKey, 'Authorization': 'Bearer ' + loginPayload.access_token, 'Content-Type':'application/json' },
+      body: JSON.stringify({ password: pp.next })
+    });
+    const payload = await res.json().catch(()=>({}));
+    if(!res.ok) throw new Error(friendlyAuthError(payload, 'Hindi napalitan ang password (error ' + res.status + ').'));
+    state.pwPrompt = null;
+    showToast('Napalitan na ang password mo.');
+  }catch(e){
+    if(state.pwPrompt) state.pwPrompt.busy = false;
+    showToast(e.message, true);
+  }
+  render();
+}
+function pwModalMarkup(){
+  const pp = state.pwPrompt;
+  if(!pp) return '';
+  return `
+  <div class="free-scrim" id="pw-scrim"></div>
+  <div class="free-modal" role="dialog" aria-modal="true" aria-label="Change password">
+    <h2>\uD83D\uDD11 Change password</h2>
+    <div class="setup-note" style="margin-bottom:12px;">Para sa account na <b>${escapeHtml(state.user && state.user.email ? state.user.email : '')}</b>. Ilagay muna ang kasalukuyang password.</div>
+    <div class="field"><label>Current password</label><input id="pw-cur" type="password" autocomplete="current-password" value="${escapeHtml(pp.cur)}"></div>
+    <div class="field"><label>New password (6+ characters)</label><input id="pw-new" type="password" autocomplete="new-password" value="${escapeHtml(pp.next)}"></div>
+    <div class="field"><label>Confirm new password</label><input id="pw-confirm" type="password" autocomplete="new-password" value="${escapeHtml(pp.confirm)}"></div>
+    <label style="display:flex; align-items:center; gap:8px; font-size:13.5px; color:var(--ink-dim); margin-top:2px;"><input type="checkbox" id="pw-show" style="width:auto;"> Ipakita ang password</label>
+    <div style="display:flex; gap:8px; margin-top:14px;">
+      <button class="primary" id="pw-save" style="flex:1; margin-top:0;" ${pp.busy ? 'disabled' : ''}>${pp.busy ? 'Saving...' : 'Save new password'}</button>
+      <button class="ghost" id="pw-cancel" style="flex:1;">Cancel</button>
+    </div>
+  </div>`;
 }
 
 async function updateUserRole(userId, role){
@@ -2076,18 +2162,20 @@ drop policy if exists "admins can remove profiles" on profiles;
 create policy "admins can remove profiles" on profiles for delete to authenticated using (public.current_user_role() = 'admin');</code>
     <div class="setup-note" style="margin-top:10px;">Tip: kung naka-on ang <strong>Confirm email</strong> sa Supabase (Authentication &rarr; Providers &rarr; Email), kailangan munang i-confirm ng bagong user ang email niya bago siya makapag-login. Pwede mo itong i-off doon kung gusto mong instant makapag-login agad ang mga cashier/regular na idadagdag mo.</div>
 
+    <div class="setup-note" style="margin-top:10px;">Puwedeng palitan ng bawat user ang sarili niyang password gamit ang <strong>\uD83D\uDD11 Password</strong> button sa itaas (katabi ng Sign out). Kung nakalimutan ng user ang password, i-reset ito sa Supabase: Authentication \u2192 Users \u2192 tatlong tuldok sa user \u2192 <em>Send password recovery</em>, o gumawa ng bagong user.</div>
+
     <div class="row2" style="margin-top:14px;">
-      <div class="field"><label>Full name</label><input id="nu-name" placeholder="e.g. Maria Santos"></div>
+      <div class="field"><label>Full name</label><input id="nu-name" placeholder="e.g. Maria Santos" value="${escapeHtml(state.userDraft.name)}"></div>
       <div class="field"><label>Role</label>
         <select id="nu-role" class="field-input">
-          <option value="cashier">Cashier</option>
-          <option value="viewer">Regular (view only)</option>
-          <option value="admin">Admin</option>
+          <option value="cashier"${state.userDraft.role==='cashier'?' selected':''}>Cashier</option>
+          <option value="viewer"${state.userDraft.role==='viewer'?' selected':''}>Regular (view only)</option>
+          <option value="admin"${state.userDraft.role==='admin'?' selected':''}>Admin</option>
         </select>
       </div>
     </div>
-    <div class="field"><label>Email</label><input id="nu-email" type="email" placeholder="user@example.com"></div>
-    <div class="field"><label>Password</label><input id="nu-password" type="password" placeholder="At least 6 characters"></div>
+    <div class="field"><label>Email</label><input id="nu-email" type="email" placeholder="user@example.com" value="${escapeHtml(state.userDraft.email)}"></div>
+    <div class="field"><label>Password</label><input id="nu-password" type="password" placeholder="At least 6 characters" value="${escapeHtml(state.userDraft.password)}"></div>
     <button class="primary" id="btn-add-user" style="width:auto; padding:9px 18px;" ${state.userBusy ? 'disabled' : ''}>${state.userBusy ? 'Adding...' : 'Add user'}</button>
 
     <div style="margin-top:18px;">
@@ -3231,7 +3319,7 @@ function render(){
 
   const active = tab => state.tab === tab ? 'active' : '';
   const mobileUser = state.connected ?
-    '<div class="m-userbar"><span class="role-badge">' + escapeHtml(roleLabel()) + '</span><span>' + escapeHtml(state.user && state.user.email ? state.user.email : 'Signed in') + '</span><button class="ghost" id="btn-logout-m" style="padding:5px 9px;">Sign out</button></div>' : '';
+    '<div class="m-userbar"><span class="role-badge">' + escapeHtml(roleLabel()) + '</span><span>' + escapeHtml(state.user && state.user.email ? state.user.email : 'Signed in') + '</span><button class="ghost" data-chpw="1" style="padding:5px 9px;">\uD83D\uDD11 Password</button><button class="ghost" id="btn-logout-m" style="padding:5px 9px;">Sign out</button></div>' : '';
   const nav = state.connected ?
     '<nav class="tabs' + (state.menuOpen ? ' open' : '') + '">' +
       (isViewer() ? '' : '<button data-tab="pos" class="' + active('pos') + '">Sell</button>') +
@@ -3255,7 +3343,7 @@ function render(){
   const burger = state.connected ? '<button class="burger" id="btn-burger" aria-label="Menu">☰</button>' : '';
   const scrim = state.connected ? '<button class="scrim' + (state.menuOpen ? ' open' : '') + '" aria-label="Close menu" tabindex="-1"></button>' : '';
   const userBar = state.connected ?
-    '<div class="user-bar"><span class="role-badge">' + escapeHtml(roleLabel()) + '</span><span>' + escapeHtml(state.user && state.user.email ? state.user.email : 'Signed in') + '</span><button class="ghost" id="btn-logout" style="padding:5px 9px;">Sign out</button></div>' : '';
+    '<div class="user-bar"><span class="role-badge">' + escapeHtml(roleLabel()) + '</span><span>' + escapeHtml(state.user && state.user.email ? state.user.email : 'Signed in') + '</span><button class="ghost" data-chpw="1" style="padding:5px 9px;">\uD83D\uDD11 Password</button><button class="ghost" id="btn-logout" style="padding:5px 9px;">Sign out</button></div>' : '';
 
   app.innerHTML =
     '<header class="top"><div style="display:flex;align-items:center;gap:14px;"><img src="CCFACO.png" alt="CCFACO Management System logo" width="56" height="52" style="filter: drop-shadow(0 2px 6px rgba(0,0,0,0.4));"><div><h1><span class="brand-gold">CCFACO</span> <span class="brand-dim">Management System</span></h1><div class="sub">Designed by Arvin B.</div></div></div>' +
@@ -3263,6 +3351,7 @@ function render(){
     scrim +
     body +
     freeModalMarkup() +
+    pwModalMarkup() +
     (state.toast ? '<div class="toast ' + (state.toast.isErr ? 'err' : '') + '">' + escapeHtml(state.toast.msg) + '</div>' : '');
 
   if(isViewer() && state.tab === 'pos'){
@@ -3580,6 +3669,29 @@ function render(){
   if(cancelMemberBtn) cancelMemberBtn.addEventListener('click', ()=>{ state.editingMember = null; render(); });
 
   /* users (admin-only) */
+  app.querySelectorAll('[data-chpw]').forEach(b=> b.addEventListener('click', openPwPrompt));
+  if(state.pwPrompt){
+    const pc = document.getElementById('pw-cur'), pn = document.getElementById('pw-new'), pf = document.getElementById('pw-confirm');
+    if(pc) pc.addEventListener('input', ()=>{ state.pwPrompt.cur = pc.value; });
+    if(pn) pn.addEventListener('input', ()=>{ state.pwPrompt.next = pn.value; });
+    if(pf){
+      pf.addEventListener('input', ()=>{ state.pwPrompt.confirm = pf.value; });
+      pf.addEventListener('keydown', ev=>{ if(ev.key === 'Enter') changeOwnPassword(); });
+    }
+    if(state.pwPrompt.focus){ state.pwPrompt.focus = false; if(pc) pc.focus(); }
+    const showCb = document.getElementById('pw-show');
+    if(showCb) showCb.addEventListener('change', ()=>{ [pc, pn, pf].forEach(i=>{ if(i) i.type = showCb.checked ? 'text' : 'password'; }); });
+    const pwSave = document.getElementById('pw-save');
+    if(pwSave) pwSave.addEventListener('click', changeOwnPassword);
+    const pwCancel = document.getElementById('pw-cancel');
+    if(pwCancel) pwCancel.addEventListener('click', ()=>{ state.pwPrompt = null; render(); });
+    const pwScrim = document.getElementById('pw-scrim');
+    if(pwScrim) pwScrim.addEventListener('click', ()=>{ state.pwPrompt = null; render(); });
+  }
+  [['nu-name','name'],['nu-email','email'],['nu-password','password'],['nu-role','role']].forEach(([id, key])=>{
+    const f = document.getElementById(id);
+    if(f) f.addEventListener(key === 'role' ? 'change' : 'input', ()=>{ state.userDraft[key] = f.value; });
+  });
   const addUserBtn = document.getElementById('btn-add-user');
   if(addUserBtn){
     addUserBtn.addEventListener('click', async ()=>{
@@ -3784,6 +3896,7 @@ const navStack = [];
 let lastBackAt = 0;
 function pushGuard(){ try{ history.pushState({ccfaco:1}, ''); }catch(e){} }
 function closeTopOverlay(){
+  if(state.pwPrompt){ state.pwPrompt = null; render(); return true; }
   if(state.freePrompt){ state.freePrompt = null; render(); return true; }
   if(state.themeOpen){ setThemeOpen(false); return true; }
   if(state.menuOpen){ state.menuOpen = false; render(); return true; }
