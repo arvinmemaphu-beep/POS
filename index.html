@@ -499,6 +499,8 @@ const state = {
   consignSearch: '',
   productLogsLoading: false,
   userDraft: { name:'', role:'cashier', email:'', password:'' }, // Add-user form values, kept so a failed attempt does not wipe what was typed
+  usersError: '',       // why the Current users list could not load (shown in Settings)
+  usersLoading: false,
   pwPrompt: null,       // {cur, next, confirm, busy} while the Change password popup is open
   freeCol: false,       // true once sale_items has is_free + free_remarks columns (see Settings SQL)
   freePrompt: null,     // {id, qty, remarks} while the Freebie remarks popup is open
@@ -1961,13 +1963,21 @@ function roleDisplay(role){ return role === 'admin' ? 'Admin' : (role === 'viewe
 
 async function fetchAppUsers(){
   if(!state.connected || !isAdmin()) return;
+  state.usersLoading = true; state.usersError = ''; render();
   try{
-    const res = await fetch(`${state.supaUrl}/rest/v1/profiles?select=*&order=full_name.asc`, { headers: supaHeaders() });
-    if(!res.ok) throw new Error('Could not load users. Run the Manage users SQL in Settings first.');
-    state.appUsers = await res.json();
+    const res = await fetch(`${state.supaUrl}/rest/v1/profiles?select=*`, { headers: supaHeaders() });
+    if(!res.ok){
+      const err = await res.json().catch(()=>({}));
+      throw new Error((err.message || 'error ' + res.status) + ' (' + res.status + ')');
+    }
+    const rows = await res.json();
+    rows.sort((x, y) => String(x.full_name || x.email || '').toLowerCase().localeCompare(String(y.full_name || y.email || '').toLowerCase()));
+    state.appUsers = rows;
   }catch(e){
+    state.usersError = e.message;
     showToast('Could not load users: ' + e.message, true);
   }
+  state.usersLoading = false;
   render();
 }
 
@@ -2133,7 +2143,7 @@ function userRowHtml(u){
   const isMe = state.user && state.user.id === u.user_id;
   return '<div class="product-row" style="cursor:default;">' +
     '<div><div class="name">' + escapeHtml(u.full_name || u.email || 'Unnamed') + (isMe ? ' <span style="color:var(--ink-dim); font-size:12px;">(you)</span>' : '') + '</div>' +
-    '<div class="meta">' + escapeHtml(u.email || '') + '</div></div>' +
+    '<div class="meta">' + (u.email ? escapeHtml(u.email) : '<em>walang email na naka-save (tingnan ang "Fill in emails" SQL sa baba)</em>') + '</div></div>' +
     '<div style="display:flex; align-items:center; gap:8px;">' +
     '<select class="field-input" data-role-user="' + u.user_id + '" style="width:auto; padding:5px 8px; font-size:13px;">' +
       '<option value="admin"' + (u.role==='admin'?' selected':'') + '>Admin</option>' +
@@ -2145,7 +2155,19 @@ function userRowHtml(u){
 }
 
 function userRowsHtml(){
-  return (state.appUsers||[]).map(userRowHtml).join('') || '<div class="empty">No users yet. Add one below.</div>';
+  if(state.usersLoading && !(state.appUsers||[]).length) return '<div class="empty">Loading users...</div>';
+  let rows = (state.appUsers || []).slice();
+  // always show at least your own account, even if the list could not be loaded
+  if(!rows.length && state.user){
+    rows = [{ user_id: state.user.id, full_name: null, email: state.user.email || '', role: state.role }];
+  }
+  let html = '';
+  if(state.usersError){
+    html += '<div class="setup-note" style="border-color:var(--red); margin-bottom:10px;"><strong>Hindi ma-load ang listahan ng users:</strong> ' + escapeHtml(state.usersError) + '<br>I-run ang <strong>Manage users</strong> SQL sa itaas (isang beses), tapos pindutin ang Reload.</div>';
+  }else if(rows.length <= 1 && !state.usersLoading){
+    html += '<div class="setup-note" style="margin-bottom:10px;">Ikaw lang ang nakikita. Kung may iba ka pang user na hindi lumalabas, i-run ang <strong>Manage users</strong> SQL sa itaas (isang beses), tapos pindutin ang Reload.</div>';
+  }
+  return html + (rows.map(userRowHtml).join('') || '<div class="empty">No users yet. Add one above.</div>');
 }
 
 function renderAdminSettings(){
@@ -2174,6 +2196,12 @@ drop policy if exists "admins can remove profiles" on profiles;
 create policy "admins can remove profiles" on profiles for delete to authenticated using (public.current_user_role() = 'admin');</code>
     <div class="setup-note" style="margin-top:10px;">Tip: kung naka-on ang <strong>Confirm email</strong> sa Supabase (Authentication &rarr; Providers &rarr; Email), kailangan munang i-confirm ng bagong user ang email niya bago siya makapag-login. Pwede mo itong i-off doon kung gusto mong instant makapag-login agad ang mga cashier/regular na idadagdag mo.</div>
 
+    <div class="setup-note" style="margin-top:10px;"><strong>Fill in emails:</strong> ang mga user na ginawa mismo sa Supabase (hindi sa app na ito) ay walang email na naka-save dito. I-run ito nang isang beses para mapunan ang lahat, tapos pindutin ang Reload:</div>
+    <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">update public.profiles p
+set email = u.email
+from auth.users u
+where u.id = p.user_id and (p.email is null or p.email = '');</code>
+
     <div class="setup-note" style="margin-top:10px;">Puwedeng palitan ng bawat user ang sarili niyang password gamit ang <strong>\uD83D\uDD11 Password</strong> button sa itaas (katabi ng Sign out). Kung nakalimutan ng user ang password, i-reset ito sa Supabase: Authentication \u2192 Users \u2192 tatlong tuldok sa user \u2192 <em>Send password recovery</em>, o gumawa ng bagong user.</div>
 
     <div class="row2" style="margin-top:14px;">
@@ -2191,7 +2219,7 @@ create policy "admins can remove profiles" on profiles for delete to authenticat
     <button class="primary" id="btn-add-user" style="width:auto; padding:9px 18px;" ${state.userBusy ? 'disabled' : ''}>${state.userBusy ? 'Adding...' : 'Add user'}</button>
 
     <div style="margin-top:18px;">
-      <h2 style="margin-bottom:10px;">Current users</h2>
+      <h2 style="margin-bottom:10px; display:flex; align-items:center; justify-content:space-between; gap:10px;"><span>Current users</span><button class="ghost" id="btn-reload-users" style="padding:5px 10px; font-size:13px;">Reload</button></h2>
       <div id="user-list" class="product-list">${userRowsHtml()}</div>
     </div>
 
@@ -3730,6 +3758,8 @@ function render(){
     const f = document.getElementById(id);
     if(f) f.addEventListener(key === 'role' ? 'change' : 'input', ()=>{ state.userDraft[key] = f.value; });
   });
+  const reloadUsersBtn = document.getElementById('btn-reload-users');
+  if(reloadUsersBtn) reloadUsersBtn.addEventListener('click', fetchAppUsers);
   const addUserBtn = document.getElementById('btn-add-user');
   if(addUserBtn){
     addUserBtn.addEventListener('click', async ()=>{
