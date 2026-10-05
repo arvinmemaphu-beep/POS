@@ -2103,17 +2103,29 @@ async function updateUserRole(userId, role){
   }
 }
 
+// Deletes the user completely (login + role) through the admin_delete_user SQL function (see Settings SQL)
 async function removeUserAccess(userId){
+  if(!isAdmin()) return;
+  if(state.user && state.user.id === userId){ showToast('Hindi mo puwedeng burahin ang sarili mong account.', true); return; }
+  const u = (state.appUsers || []).find(x => x.user_id === userId);
+  const who = u ? (u.full_name || u.email || 'user na ito') : 'user na ito';
+  if(!confirm('Sigurado ka bang buburahin si ' + who + (u && u.email ? ' (' + u.email + ')' : '') + '?\n\nMawawala ang login niya at hindi na ito maibabalik.')) return;
   try{
-    const res = await fetch(`${state.supaUrl}/rest/v1/profiles?user_id=eq.${userId}`, {
-      method:'DELETE', headers: supaHeaders()
+    const res = await fetch(`${state.supaUrl}/rest/v1/rpc/admin_delete_user`, {
+      method:'POST', headers: supaHeaders(),
+      body: JSON.stringify({ target: userId })
     });
-    if(!res.ok) throw new Error('Failed.');
-    state.appUsers = state.appUsers.filter(u=>u.user_id!==userId);
+    if(!res.ok){
+      const err = await res.json().catch(()=>({}));
+      const m = String(err.message || '');
+      if(res.status === 404 || err.code === 'PGRST202') throw new Error('I-run muna ang "Delete user" SQL sa Settings.');
+      throw new Error(m || ('error ' + res.status));
+    }
+    state.appUsers = state.appUsers.filter(x=>x.user_id!==userId);
     render();
-    showToast('Access removed.');
+    showToast('User deleted.');
   }catch(e){
-    showToast('Could not remove access: ' + e.message, true);
+    showToast('Could not delete user: ' + e.message, true);
   }
 }
 
@@ -2128,7 +2140,7 @@ function userRowHtml(u){
       '<option value="cashier"' + (u.role==='cashier'?' selected':'') + '>Cashier</option>' +
       '<option value="viewer"' + (u.role==='viewer'?' selected':'') + '>Regular</option>' +
     '</select>' +
-    (isMe ? '' : '<button class="icon-btn" data-remove-user="' + u.user_id + '" title="Remove access">\u2715</button>') +
+    (isMe ? '' : '<button class="icon-btn" data-remove-user="' + u.user_id + '" title="Delete user">\u2715</button>') +
     '</div></div>';
 }
 
@@ -2346,6 +2358,32 @@ create policy "staff can write ledger" on ledger_entries for all to authenticate
         <div class="setup-note">I-run ito nang isang beses para magamit ang \uD83C\uDF81 Free button sa Sell tab. Kapag nagbigay ng libre (free token, gift, free taste), ire-record ito na \u20B10.00 kasama ang remarks, at lalabas sa Daily, History, at Monthly report. Hindi ito isasama sa sales total.</div>
         <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">alter table sale_items add column if not exists is_free boolean not null default false;
 alter table sale_items add column if not exists free_remarks text;
+notify pgrst, 'reload schema';</code>
+      </div>
+
+      <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
+        <h2>Delete user</h2>
+        <div class="setup-note">I-run ito nang isang beses para gumana ang \u2715 button sa Manage users. Buburahin nito nang buo ang user (login at role). Admin lang ang makakagamit, at hindi mo mabubura ang sarili mong account.</div>
+        <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">create or replace function public.admin_delete_user(target uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+begin
+  if public.current_user_role() is distinct from 'admin' then
+    raise exception 'Admin only';
+  end if;
+  if target = auth.uid() then
+    raise exception 'You cannot delete your own account';
+  end if;
+  delete from public.profiles where user_id = target;
+  delete from auth.users where id = target;
+end;
+$$;
+
+revoke all on function public.admin_delete_user(uuid) from public, anon;
+grant execute on function public.admin_delete_user(uuid) to authenticated;
 notify pgrst, 'reload schema';</code>
       </div>
     </div>
