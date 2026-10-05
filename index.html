@@ -350,6 +350,18 @@
   .tag{ display:inline-block; font-size:11px; padding:2px 8px; border-radius:10px; border:1px solid var(--line); color:var(--ink-dim); }
   .tag.open{ border-color: var(--gold-dim); color: var(--gold); }
   .tag.closed{ border-color: var(--green); color: var(--green); }
+  .tag.free{ border-color: var(--gold); color: var(--gold); font-weight:600; }
+  .free-note{ font-size:12.5px; color: var(--ink-dim); margin-top:3px; font-weight:400; }
+  .cart-row.free{ border-left-color: var(--gold); }
+  .free-btn{ background:none; border:1px solid var(--gold-dim); color:var(--gold); border-radius:14px; padding:4px 10px; font-size:13px; font-weight:600; cursor:pointer; white-space:nowrap; font-family:inherit; }
+  .free-btn:hover{ background: var(--gold); color: var(--on-accent); }
+  .free-scrim{ position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:90; }
+  .free-modal{ position:fixed; z-index:91; left:50%; top:50%; transform:translate(-50%,-50%); width:min(440px, calc(100vw - 28px)); max-height:calc(100vh - 28px); overflow:auto;
+    background: var(--bg-panel); border:1px solid var(--gold-dim); border-radius:12px; padding:18px; box-shadow:0 12px 40px rgba(0,0,0,0.5); }
+  .free-modal h2{ margin:0 0 10px; font-size:18px; }
+  .chips{ display:flex; flex-wrap:wrap; gap:8px; }
+  .chip{ background:var(--bg-panel-2); border:1px solid var(--line); color:var(--ink); border-radius:16px; padding:6px 12px; font-size:13.5px; cursor:pointer; font-family:inherit; }
+  .chip:hover{ border-color: var(--gold); color: var(--gold); }
   .cons-item{ display:flex; flex-wrap:wrap; align-items:flex-end; gap:10px; padding:9px 0; border-bottom:1px solid var(--line); font-size:13px; }
   .cons-item:last-child{ border-bottom:none; }
   .cons-item .nm{ flex:1; min-width:130px; }
@@ -486,6 +498,8 @@ const state = {
   deductQty: '',
   consignSearch: '',
   productLogsLoading: false,
+  freeCol: false,       // true once sale_items has is_free + free_remarks columns (see Settings SQL)
+  freePrompt: null,     // {id, qty, remarks} while the Freebie remarks popup is open
   discountCol: false,   // true once the products table has a discount column (see Settings SQL)
   saleMemberId: '',      // id of the member picked for THIS sale in the Sell tab; '' = walk-in, no discount
   consignMemberId: '',   // member picked when sending a consignment out; discount applies to it at settle time
@@ -614,7 +628,7 @@ async function restoreAuth(){
     await fetchCurrentUser();
     await loadProfile();
     const ok = await testConnection();
-    if(ok){ await checkDiscountColumn(); await checkConsignMemberColumn(); await checkLedgerReady(); await checkLedgerDepositColumn(); await fetchProducts(); await fetchMembers(); }
+    if(ok){ await checkDiscountColumn(); await checkFreeColumn(); await checkConsignMemberColumn(); await checkLedgerReady(); await checkLedgerDepositColumn(); await fetchProducts(); await fetchMembers(); }
     return ok;
   }catch(e){
     clearSession();
@@ -646,6 +660,7 @@ async function login(email, password){
     await loadProfile();
     if(!await testConnection()) throw new Error('Signed in, but the POS tables could not be reached. Check your Supabase setup.');
     await checkDiscountColumn();
+    await checkFreeColumn();
     await checkConsignMemberColumn();
     await checkLedgerReady();
     await checkLedgerDepositColumn();
@@ -746,7 +761,7 @@ async function fetchSales(){
   if(!state.connected) return;
   state.loading = true; render();
   try{
-    const res = await fetch(`${state.supaUrl}/rest/v1/sales?select=*,sale_items(product_name,price,qty)&order=created_at.desc&limit=50`, { headers: supaHeaders() });
+    const res = await fetch(`${state.supaUrl}/rest/v1/sales?select=*,sale_items(${saleItemCols()})&order=created_at.desc&limit=50`, { headers: supaHeaders() });
     if(!res.ok) throw new Error('Failed to load sales');
     state.sales = await res.json();
   }catch(e){
@@ -898,14 +913,14 @@ async function exportHistoryToExcel(){
   if(btn){ btn.disabled = true; btn.textContent = 'Exporting...'; }
   try{
     const [sales, consignments] = await Promise.all([
-      fetchAllRows('sales', 'select=*,sale_items(product_name,price,qty)&order=created_at.desc,id.asc'),
+      fetchAllRows('sales', `select=*,sale_items(${saleItemCols()})&order=created_at.desc,id.asc`),
       fetchAllRows('consignments', 'select=*,consignment_items(*)&order=created_at.desc,id.asc')
     ]);
     if(sales.length === 0 && consignments.length === 0){ showToast('Wala pang data na i-eexport.', true); return; }
 
     const salesSummary = sales.map(s => {
       const d = new Date(s.created_at);
-      const items = (s.sale_items || []).map(i => `${i.qty}x ${i.product_name}`).join(', ');
+      const items = (s.sale_items || []).map(i => `${i.qty}x ${i.product_name}${i.is_free ? ' (FREE' + (i.free_remarks ? ': ' + i.free_remarks : '') + ')' : ''}`).join(', ');
       return { Date: d.toLocaleDateString(), Time: d.toLocaleTimeString(), Items: items, Total: Number(s.total) };
     });
 
@@ -916,7 +931,8 @@ async function exportHistoryToExcel(){
         saleItemRows.push({
           Date: d.toLocaleDateString(), Time: d.toLocaleTimeString(),
           Product: i.product_name, Qty: i.qty,
-          'Unit Price': Number(i.price), Subtotal: Number(i.price) * Number(i.qty)
+          'Unit Price': Number(i.price), Subtotal: Number(i.price) * Number(i.qty),
+          Type: i.is_free ? 'FREE' : 'Sale', Remarks: i.free_remarks || ''
         });
       });
     });
@@ -1013,6 +1029,20 @@ async function checkDiscountColumn(){
   }
 }
 
+// Detect once whether sale_items has the Freebie columns (see Settings SQL)
+async function checkFreeColumn(){
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/sale_items?select=is_free,free_remarks&limit=1`, { headers: supaHeaders() });
+    state.freeCol = res.ok;
+  }catch(e){
+    state.freeCol = false;
+  }
+}
+function saleItemCols(){ return 'product_name,price,qty' + (state.freeCol ? ',is_free,free_remarks' : ''); }
+function saleItemLabel(i){
+  return `${i.qty}\u00D7 ${i.product_name}` + (i.is_free ? ' \uD83C\uDF81FREE' + (i.free_remarks ? ' (' + escapeHtml(i.free_remarks) + ')' : '') : '');
+}
+
 // Detect once whether the consignments table has a member_id column (see Settings SQL)
 async function checkConsignMemberColumn(){
   try{
@@ -1043,26 +1073,59 @@ async function checkLedgerDepositColumn(){
   }
 }
 
+let freeSeq = 0;
 function addToCart(product){
   if(blockViewer()) return;
-  const existing = state.cart.find(c=>c.id===product.id);
+  const existing = state.cart.find(c=>c.id===product.id && !c.free);
   if(existing){ existing.qty += 1; }
-  else{ state.cart.push({ id: product.id, name: product.name, price: product.price, qty: 1 }); }
+  else{ state.cart.push({ key: product.id, id: product.id, name: product.name, price: product.price, qty: 1 }); }
+  render();
+}
+
+// Freebie line: price is always zero, and a remarks note (what it is for / who it is given to) is required
+function addFreeToCart(product, qty, remarks){
+  if(blockViewer()) return;
+  const existing = state.cart.find(c=>c.id===product.id && c.free && (c.remarks||'').toLowerCase() === remarks.toLowerCase());
+  if(existing){ existing.qty += qty; }
+  else{ state.cart.push({ key: 'free-' + (++freeSeq), id: product.id, name: product.name, price: 0, qty, free: true, remarks }); }
+}
+
+function openFreePrompt(productId){
+  if(blockViewer()) return;
+  if(!state.freeCol){
+    showToast(isAdmin() ? 'I-run muna ang "Freebies" SQL sa Settings tab.' : 'Hindi pa naka-set up ang Freebies. Sabihan ang Admin.', true);
+    return;
+  }
+  state.freePrompt = { id: productId, qty: '1', remarks: '', focus: true };
+  render();
+}
+
+function confirmFreePrompt(){
+  const fp = state.freePrompt;
+  if(!fp) return;
+  const prod = state.products.find(p=>p.id===fp.id);
+  const qty = Math.floor(Number(fp.qty));
+  const remarks = (fp.remarks || '').trim();
+  if(!prod){ state.freePrompt = null; render(); return; }
+  if(!qty || qty < 1){ showToast('Ilagay kung ilan ang ibibigay.', true); return; }
+  if(remarks.length < 3){ showToast('Lagyan ng remarks kung para saan o kanino ibibigay.', true); return; }
+  addFreeToCart(prod, qty, remarks);
+  state.freePrompt = null;
   render();
 }
 
 function changeQty(id, delta){
-  const item = state.cart.find(c=>c.id===id);
+  const item = state.cart.find(c=>c.key===id);
   if(!item) return;
   item.qty = (Number(item.qty)||0) + delta;
-  if(item.qty <= 0){ state.cart = state.cart.filter(c=>c.id!==id); }
+  if(item.qty <= 0){ state.cart = state.cart.filter(c=>c.key!==id); }
   if(state.cart.length === 0){ state.tendered = ''; }
   render();
 }
 
 // Typed quantity: update numbers live without re-rendering (keeps focus in the input)
 function setCartQty(id, raw){
-  const item = state.cart.find(c=>c.id===id);
+  const item = state.cart.find(c=>c.key===id);
   if(!item) return;
   const n = Math.floor(Number(raw));
   item.qty = (raw === '' || isNaN(n) || n < 0) ? 0 : n;
@@ -1070,16 +1133,16 @@ function setCartQty(id, raw){
 }
 
 function commitCartQty(id){
-  const item = state.cart.find(c=>c.id===id);
+  const item = state.cart.find(c=>c.key===id);
   if(!item) return;
-  if(!item.qty || item.qty <= 0){ state.cart = state.cart.filter(c=>c.id!==id); }
+  if(!item.qty || item.qty <= 0){ state.cart = state.cart.filter(c=>c.key!==id); }
   if(state.cart.length === 0){ state.tendered = ''; }
   render();
 }
 
 function updateCartDisplay(){
   for(const c of state.cart){
-    const lineEl = document.querySelector(`[data-line="${c.id}"]`);
+    const lineEl = document.querySelector(`[data-line="${c.key}"]`);
     if(lineEl) lineEl.textContent = money(lineTotal(c));
   }
   const totalEl = document.getElementById('cart-total-amt');
@@ -1108,6 +1171,7 @@ function consignUnitPrice(item, consignment){
 
 // price per piece actually charged in the cart — the discount only applies when a member is picked for this sale
 function discountedUnitPrice(c){
+  if(c.free) return 0;
   if(!state.saleMemberId) return c.price;
   return memberPriceOf(c);
 }
@@ -1125,7 +1189,7 @@ function updateChangeDisplay(){
   const tenderedNum = Number(state.tendered) || 0;
   const change = tenderedNum - total;
   const tenderedEntered = state.tendered !== '';
-  const insufficientAmount = !tenderedEntered || tenderedNum < total;
+  const insufficientAmount = total > 0 && (!tenderedEntered || tenderedNum < total);
 
   const changeEl = document.getElementById('change-amount');
   if(changeEl){
@@ -1148,8 +1212,12 @@ async function checkout(){
   if(state.checkingOut) return; // prevent double-submit from fast/repeated taps
   const total = cartTotal();
   const tenderedNum = Number(state.tendered) || 0;
-  if(state.tendered === '' || tenderedNum < total){
+  if(total > 0 && (state.tendered === '' || tenderedNum < total)){
     showToast('Enter a valid amount received (must cover the total).', true);
+    return;
+  }
+  if(state.cart.some(c=>c.free) && !state.freeCol){
+    showToast('I-run muna ang "Freebies" SQL sa Settings tab.', true);
     return;
   }
   state.checkingOut = true;
@@ -1168,7 +1236,8 @@ async function checkout(){
       product_id: c.id,
       product_name: c.name,
       price: discountedUnitPrice(c),
-      qty: c.qty
+      qty: c.qty,
+      ...(state.freeCol ? { is_free: !!c.free, free_remarks: c.free ? c.remarks : null } : {})
     }));
     const itemsRes = await fetch(`${state.supaUrl}/rest/v1/sale_items`, {
       method:'POST', headers: supaHeaders(),
@@ -1176,11 +1245,14 @@ async function checkout(){
     });
     if(!itemsRes.ok) throw new Error('Failed to record sale items');
 
-    for(const c of state.cart){
-      const prod = state.products.find(p=>p.id===c.id);
+    // a product can be on two lines (paid + freebie), so add the quantities up before deducting stock
+    const usedQty = {};
+    for(const c of state.cart){ usedQty[c.id] = (usedQty[c.id] || 0) + (Number(c.qty) || 0); }
+    for(const pid of Object.keys(usedQty)){
+      const prod = state.products.find(p=>String(p.id)===pid);
       if(prod){
-        const newStock = Math.max(0, (prod.stock||0) - c.qty);
-        await fetch(`${state.supaUrl}/rest/v1/products?id=eq.${c.id}`, {
+        const newStock = Math.max(0, (prod.stock||0) - usedQty[pid]);
+        await fetch(`${state.supaUrl}/rest/v1/products?id=eq.${pid}`, {
           method:'PATCH', headers: supaHeaders(),
           body: JSON.stringify({ stock: newStock })
         });
@@ -1190,10 +1262,10 @@ async function checkout(){
     state.tendered = '';
     state.saleMemberId = '';
     await fetchProducts();
-    const itemsSummary = itemRows.map(r => `${r.qty}x ${r.product_name}`).join(', ');
-    await postSaleToLedger(saleId, total, itemsSummary);
+    const itemsSummary = itemRows.map(r => `${r.qty}x ${r.product_name}${r.is_free ? ' (FREE)' : ''}`).join(', ');
+    if(total > 0) await postSaleToLedger(saleId, total, itemsSummary); // all-free sales have nothing to put in the cash ledger
     if(state.tab === 'ledger') await fetchLedger();
-    showToast('Sale recorded — ' + money(total));
+    showToast(total > 0 ? 'Sale recorded — ' + money(total) : 'Freebie recorded — ' + money(0));
   }catch(e){
     showToast('Checkout failed: ' + e.message, true);
   }
@@ -2180,6 +2252,14 @@ create policy "staff can write ledger" on ledger_entries for all to authenticate
         <div class="setup-note">I-run ito nang isang beses para may "CASH DEPOSIT" checkbox sa Add entry form ng Ledger. Kapag chinek ito sa isang Out entry (hal. cash na dinala sa bangko), mananatili pa rin ito sa Ledger balance pero HINDI na isasama sa Expense Report &mdash; dahil transfer lang ito ng pera, hindi gastos. Para sa mga LUMANG entry na dati nang naidagdag bilang expense: pumunta sa Ledger tab, Admin lang ang makakakita ng \u270E button sa tabi ng bawat Out entry &mdash; i-tap iyon para markahan (o i-unmark) na deposit.</div>
         <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">alter table ledger_entries add column if not exists is_deposit boolean not null default false;</code>
       </div>
+
+      <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
+        <h2>Freebies (libre)</h2>
+        <div class="setup-note">I-run ito nang isang beses para magamit ang \uD83C\uDF81 Free button sa Sell tab. Kapag nagbigay ng libre (free token, gift, free taste), ire-record ito na \u20B10.00 kasama ang remarks, at lalabas sa Daily, History, at Monthly report. Hindi ito isasama sa sales total.</div>
+        <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">alter table sale_items add column if not exists is_free boolean not null default false;
+alter table sale_items add column if not exists free_remarks text;
+notify pgrst, 'reload schema';</code>
+      </div>
     </div>
   </div>`;
 }
@@ -2230,20 +2310,23 @@ function renderPOS(){
         <div class="name">${p.name}</div>
         <div class="meta"><span class="stock-num${p.stock<=5?' stock-low':''}">${p.stock}</span> in stock${discMeta}</div>
       </div>
-      <div class="price mono">${priceHtml}</div>
+      <div style="display:flex; align-items:center; gap:10px;">
+        <div class="price mono">${priceHtml}</div>
+        ${isViewer() ? '' : `<button class="free-btn" data-free="${p.id}" title="Freebie (libre)" aria-label="Freebie">\uD83C\uDF81 Free</button>`}
+      </div>
     </div>`;
   }).join('') + ((q && matchCount === 0) ? `<div class="empty">No products match your search.</div>` : '');
   const rowsOrEmpty = state.products.length ? rows : `<div class="empty">No products yet. Add some in the Products tab.</div>`;
 
   const cartRows = state.cart.map(c => `
-    <div class="cart-row">
-      <div class="name">${c.name}</div>
+    <div class="cart-row${c.free ? ' free' : ''}">
+      <div class="name">${c.name}${c.free ? ' <span class="tag free">\uD83C\uDF81 FREE</span><div class="free-note">' + escapeHtml(c.remarks) + '</div>' : ''}</div>
       <div class="qty-controls">
-        <button data-dec="${c.id}">\u2212</button>
-        <input class="qty-input mono" data-qty="${c.id}" type="number" min="0" step="1" inputmode="numeric" value="${c.qty}">
-        <button data-inc="${c.id}">+</button>
+        <button data-dec="${c.key}">\u2212</button>
+        <input class="qty-input mono" data-qty="${c.key}" type="number" min="0" step="1" inputmode="numeric" value="${c.qty}">
+        <button data-inc="${c.key}">+</button>
       </div>
-      <div class="mono" data-line="${c.id}" style="width:70px; text-align:right;">${money(lineTotal(c))}</div>
+      <div class="mono" data-line="${c.key}" style="width:70px; text-align:right;">${money(lineTotal(c))}</div>
     </div>
   `).join('') || `<div class="empty">Cart is empty. Tap a product to add it.</div>`;
 
@@ -2252,7 +2335,7 @@ function renderPOS(){
   const change = tenderedNum - total;
   const hasCart = state.cart.length > 0;
   const tenderedEntered = state.tendered !== '';
-  const insufficientAmount = hasCart && (!tenderedEntered || tenderedNum < total);
+  const insufficientAmount = hasCart && total > 0 && (!tenderedEntered || tenderedNum < total);
   const canCheckout = hasCart && !state.checkingOut && !insufficientAmount;
 
   return `
@@ -2276,7 +2359,7 @@ function renderPOS(){
         <span>Total</span>
         <span class="amt mono" id="cart-total-amt">${money(total)}</span>
       </div>
-      ${hasCart ? `
+      ${hasCart && total > 0 ? `
       <div class="field" style="margin-top:14px;">
         <label>Amount received</label>
         <input id="in-tendered" type="number" step="0.01" inputmode="decimal" placeholder="0.00" value="${state.tendered}">
@@ -2287,7 +2370,8 @@ function renderPOS(){
       </div>
       <div id="insufficient-msg" style="color:var(--red); font-size:12.5px; margin-top:8px;">${insufficientAmount ? (!tenderedEntered ? 'Enter the amount received before completing the sale.' : 'Amount received is less than the total.') : ''}</div>
       ` : ''}
-      <button class="primary" id="btn-checkout" ${!canCheckout?'disabled':''}>${state.checkingOut ? 'Saving...' : 'Complete sale'}</button>
+      ${hasCart && total === 0 ? '<div class="setup-note" style="margin-top:12px;">Libre lahat ng nasa cart \u2014 walang babayaran. Mare-record ito na \u20B10.00 kasama ang remarks.</div>' : ''}
+      <button class="primary" id="btn-checkout" ${!canCheckout?'disabled':''}>${state.checkingOut ? 'Saving...' : (hasCart && total === 0 ? 'Record freebie' : 'Complete sale')}</button>
     </div>
   </div>`;
 }
@@ -2478,7 +2562,7 @@ async function fetchReport(){
     const all = [];
     const step = 1000;
     for(let from = 0; ; from += step){
-      const res = await fetch(`${state.supaUrl}/rest/v1/sales?select=created_at,total,sale_items(product_name,price,qty)&${range('created_at')}&order=created_at.asc`,
+      const res = await fetch(`${state.supaUrl}/rest/v1/sales?select=created_at,total,sale_items(${saleItemCols()})&${range('created_at')}&order=created_at.asc`,
         { headers: Object.assign({}, supaHeaders(), { 'Range-Unit':'items', 'Range': `${from}-${from+step-1}` }) });
       if(!res.ok) throw new Error('Failed to load sales');
       const rows = await res.json();
@@ -2505,8 +2589,8 @@ async function fetchReport(){
   state.reportLoading = false; render();
 }
 function computeReport(){
-  const days = {}, prods = {};
-  let total = 0;
+  const days = {}, prods = {}, freebies = [];
+  let total = 0, freeQty = 0;
   state.reportSales.forEach(s=>{
     const t = Number(s.total) || 0;
     total += t;
@@ -2517,17 +2601,23 @@ function computeReport(){
       const key = name.toLowerCase();
       const p = prods[key] || (prods[key] = { name, qty:0, revenue:0 });
       const q = Number(i.qty) || 0;
+      if(i.is_free){
+        p.free = (p.free || 0) + q; freeQty += q;
+        freebies.push({ date: new Date(s.created_at), name, qty: q, remarks: (i.free_remarks || '').trim() });
+        return;
+      }
       p.qty += q;
       p.revenue += (Number(i.price) || 0) * q;
     });
   });
-  const count = state.reportSales.length;
+  const count = state.reportSales.filter(s => (Number(s.total) || 0) > 0).length; // paid sales only; all-free sales are listed under Freebies
+  freebies.sort((a,b)=> a.date - b.date);
   const products = Object.values(prods).sort((a,b)=> b.revenue - a.revenue);
   let bestDay = null;
   Object.keys(days).forEach(d=>{ if(!bestDay || days[d] > days[bestDay]) bestDay = d; });
   const consignValue = state.reportConsign.reduce((sum,c)=>
     sum + (c.consignment_items || []).reduce((x,i)=> x + consignUnitPrice(i, c) * (i.qty_sold || 0), 0), 0);
-  return { total, count, avg: count ? total / count : 0, days, products, bestDay, consignCount: state.reportConsign.length, consignValue };
+  return { total, count, avg: count ? total / count : 0, days, products, bestDay, consignCount: state.reportConsign.length, consignValue, freebies, freeQty };
 }
 function reportMonthLabel(){
   const r = reportRange();
@@ -2650,17 +2740,20 @@ function renderReport(){
   const shortMonth = new Date(r.y, r.m-1, 1).toLocaleDateString(undefined, { month:'short' });
   const maxRev = c.products.length ? c.products[0].revenue : 0;
   const prodRows = c.products.slice(0, 15).map(p=>
-    `<div class="sale-row"><div class="head"><span>${escapeHtml(p.name)}</span><span class="amt mono">${money(p.revenue)}</span></div><div class="items">${p.qty} sold, ${c.total ? (p.revenue / c.total * 100).toFixed(1) : '0.0'}% of sales</div><div class="rpt-share"><div style="width:${maxRev ? Math.max(2, p.revenue / maxRev * 100) : 0}%"></div></div></div>`
+    `<div class="sale-row"><div class="head"><span>${escapeHtml(p.name)}</span><span class="amt mono">${money(p.revenue)}</span></div><div class="items">${p.qty} sold${p.free ? ', \uD83C\uDF81 ' + p.free + ' free' : ''}, ${c.total ? (p.revenue / c.total * 100).toFixed(1) : '0.0'}% of sales</div><div class="rpt-share"><div style="width:${maxRev ? Math.max(2, p.revenue / maxRev * 100) : 0}%"></div></div></div>`
   ).join('');
+  const freeBlock = c.freebies.length ? `<h2 style="margin-top:18px;">\uD83C\uDF81 Freebies given (${c.freeQty} pcs, ${money(0)})</h2>` +
+    c.freebies.map(f => `<div class="sale-row"><div class="head"><span>${f.qty}\u00D7 ${escapeHtml(f.name)}</span><span class="amt mono">${money(0)}</span></div><div class="items">${f.date.toLocaleString()} \u2014 <span class="free-note" style="display:inline;">${escapeHtml(f.remarks || '(walang remarks)')}</span></div></div>`).join('') : '';
   const yearBlock = yearCompareBlock(state.reportYearTotals.length ? state.reportYearTotals : null, ex ? ex.months : null, r.y, r.m);
   const body = state.reportLoading ? '<div class="empty">Loading report...</div>' :
-    (c.count === 0 ? `<div class="empty">No sales recorded in ${escapeHtml(label)}.</div>` + yearBlock : `
+    (c.count === 0 ? `<div class="empty">No sales recorded in ${escapeHtml(label)}.</div>` + yearBlock + freeBlock : `
     <div class="rpt-stats">
       <div class="rpt-stat"><div class="lbl">Total sales</div><div class="val mono">${money(c.total)}</div></div>
       <div class="rpt-stat"><div class="lbl">Transactions</div><div class="val mono">${c.count}</div></div>
       <div class="rpt-stat"><div class="lbl">Average per sale</div><div class="val mono">${money(c.avg)}</div></div>
       <div class="rpt-stat"><div class="lbl">Best day</div><div class="val mono">${c.bestDay ? shortMonth + ' ' + c.bestDay : '-'}</div><div class="lbl" style="margin:2px 0 0;">${c.bestDay ? money(c.days[c.bestDay]) : ''}</div></div>
       ${ex ? netStatBox(c.total - ex.total, 'Expenses ' + money(ex.total)) : ''}
+      ${c.freeQty ? `<div class="rpt-stat"><div class="lbl">Freebies given</div><div class="val mono">${c.freeQty}</div><div class="lbl" style="margin:2px 0 0;">pcs, ${money(0)}</div></div>` : ''}
     </div>
     ${c.consignCount ? `<div class="setup-note" style="margin:0 0 14px;">${c.consignCount} consignment${c.consignCount>1?'s':''} settled this month, worth ${money(c.consignValue)}. This is already included in Total sales.</div>` : ''}
     <h2>${dEx ? 'Sales and expenses per day' : 'Sales per day'}</h2>
@@ -2668,7 +2761,8 @@ function renderReport(){
     <div style="margin-bottom:16px;">${dailyChartSvg(c.days, dEx, r.y, r.m, dEx ? 'Sales and expenses per day' : 'Sales per day')}</div>
     ${yearBlock}
     <h2>Top products${c.products.length > 15 ? ' (top 15 of ' + c.products.length + ')' : ''}</h2>
-    ${prodRows}`);
+    ${prodRows}
+    ${freeBlock}`);
   return `<div class="panel">
     <h2>Monthly Sales Report: ${escapeHtml(label)}</h2>
     <div class="rpt-controls no-print">
@@ -2796,7 +2890,7 @@ function exportExpensesToExcel(){
 
 function exportReportToExcel(){
   const c = computeReport();
-  if(c.count === 0){ showToast('No sales in this month to export.', true); return; }
+  if(c.count === 0 && !c.freebies.length){ showToast('No sales in this month to export.', true); return; }
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([
     { Item:'Month', Value: reportMonthLabel() },
@@ -2804,13 +2898,18 @@ function exportReportToExcel(){
     { Item:'Transactions', Value: c.count },
     { Item:'Average per sale', Value: Math.round(c.avg * 100) / 100 },
     { Item:'Consignments settled', Value: c.consignCount },
-    { Item:'Consignment sold value (already in total)', Value: c.consignValue }
+    { Item:'Consignment sold value (already in total)', Value: c.consignValue },
+    { Item:'Freebies given (pcs, zero amount)', Value: c.freeQty }
   ]), 'Summary');
   const r = reportRange();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(Object.keys(c.days).map(Number).sort((a,b)=>a-b).map(d=>
     ({ Date: new Date(r.y, r.m-1, d).toLocaleDateString(), Sales: c.days[d] }))), 'By Day');
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(c.products.map(p=>
-    ({ Product: p.name, 'Qty Sold': p.qty, Revenue: p.revenue }))), 'By Product');
+    ({ Product: p.name, 'Qty Sold': p.qty, 'Qty Free': p.free || 0, Revenue: p.revenue }))), 'By Product');
+  if(c.freebies.length){
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(c.freebies.map(f=>
+      ({ Date: f.date.toLocaleDateString(), Time: f.date.toLocaleTimeString(), Product: f.name, Qty: f.qty, Amount: 0, Remarks: f.remarks }))), 'Freebies');
+  }
   if(state.reportYearTotals.length){
     const exm = state.ledgerReady ? computeExpenses().months : null;
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(state.reportYearTotals.map((t, i)=>
@@ -2819,7 +2918,7 @@ function exportReportToExcel(){
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(state.reportSales.map(s=>{
     const d = new Date(s.created_at);
     return { Date: d.toLocaleDateString(), Time: d.toLocaleTimeString(),
-      Items: (s.sale_items || []).map(i => `${i.qty}x ${i.product_name}`).join(', '), Total: Number(s.total) };
+      Items: (s.sale_items || []).map(i => `${i.qty}x ${i.product_name}${i.is_free ? ' (FREE' + (i.free_remarks ? ': ' + i.free_remarks : '') + ')' : ''}`).join(', '), Total: Number(s.total) };
   })), 'Sales');
   XLSX.writeFile(wb, `CCFACO-Sales-${state.reportMonth}.xlsx`);
   showToast('Monthly report downloaded.');
@@ -2829,12 +2928,12 @@ function renderHistory(){
   const q = state.dailySearch.trim().toLowerCase();
   const visibleSales = q ? state.sales.filter(s => {
     const d = new Date(s.created_at);
-    const itemsStr = (s.sale_items||[]).map(i=>`${i.qty}\u00D7 ${i.product_name}`).join(', ');
+    const itemsStr = (s.sale_items||[]).map(saleItemLabel).join(', ');
     return itemsStr.toLowerCase().includes(q) || d.toLocaleString().toLowerCase().includes(q) || money(s.total).includes(q);
   }) : state.sales;
   const rows = visibleSales.map(s => {
     const d = new Date(s.created_at);
-    const itemsStr = (s.sale_items||[]).map(i=>`${i.qty}\u00D7 ${i.product_name}`).join(', ');
+    const itemsStr = (s.sale_items||[]).map(saleItemLabel).join(', ');
     return `
     <div class="sale-row">
       <div class="head">
@@ -2860,8 +2959,8 @@ function renderSaleItems(){
   const byProduct = {};
   for(const it of state.saleItems){
     const key = it.product_name;
-    if(!byProduct[key]) byProduct[key] = { qty: 0, revenue: 0 };
-    byProduct[key].qty += it.qty;
+    if(!byProduct[key]) byProduct[key] = { qty: 0, free: 0, revenue: 0 };
+    if(it.is_free) byProduct[key].free += it.qty; else byProduct[key].qty += it.qty;
     byProduct[key].revenue += it.price * it.qty;
   }
   const summaryRows = Object.entries(byProduct)
@@ -2870,7 +2969,7 @@ function renderSaleItems(){
       <div class="product-row">
         <div>
           <div class="name">${name}</div>
-          <div class="meta">${s.qty} sold</div>
+          <div class="meta">${s.qty} sold${s.free ? ' \u00B7 \uD83C\uDF81 ' + s.free + ' free' : ''}</div>
         </div>
         <div class="price mono">${money(s.revenue)}</div>
       </div>
@@ -2896,7 +2995,7 @@ function renderSaleItems(){
         <span class="amt mono">${money(it.price * it.qty)}</span>
       </div>
       <div class="items" style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
-        <span>${it.qty}\u00D7 ${it.product_name} @ ${money(it.price)}</span>
+        <span>${it.is_free ? '<span class="tag free">\uD83C\uDF81 FREE</span> ' : ''}${it.qty}\u00D7 ${it.product_name} @ ${money(it.price)}${it.is_free ? '<div class="free-note">Remarks: ' + escapeHtml(it.free_remarks || '(walang remarks)') + '</div>' : ''}</span>
         ${isAdmin() ? `<button class="icon-btn" data-edit-sale-item="${it.id}" title="Correct product name">\u270E</button>` : ''}
       </div>
     </div>`;
@@ -3079,6 +3178,26 @@ function themeMarkup(){
   '</div>';
 }
 
+function freeModalMarkup(){
+  const fp = state.freePrompt;
+  if(!fp) return '';
+  const prod = state.products.find(p=>p.id===fp.id);
+  const chips = ['Free token', 'Gift', 'Free taste'].map(t => `<button type="button" class="chip" data-free-chip="${t}">${t}</button>`).join('');
+  return `
+  <div class="free-scrim" id="free-scrim"></div>
+  <div class="free-modal" role="dialog" aria-modal="true" aria-label="Freebie">
+    <h2>\uD83C\uDF81 Freebie (libre)</h2>
+    <div class="setup-note" style="margin-bottom:12px;"><b>${prod ? escapeHtml(prod.name) : ''}</b> \u2014 \u20B10.00 ang halaga. Isulat kung para saan o kanino ibibigay; lalabas ito sa reports.</div>
+    <div class="field"><label>Quantity</label><input id="fp-qty" type="number" min="1" step="1" inputmode="numeric" value="${escapeHtml(fp.qty)}"></div>
+    <div class="field"><label>Remarks (kailangan)</label><input id="fp-remarks" placeholder="hal. Free token para sa..., Gift kay..., Free taste" value="${escapeHtml(fp.remarks)}" autocomplete="off"></div>
+    <div class="chips">${chips}</div>
+    <div style="display:flex; gap:8px; margin-top:14px;">
+      <button class="primary" id="fp-add" style="flex:1; margin-top:0;">Add to cart</button>
+      <button class="ghost" id="fp-cancel" style="flex:1;">Cancel</button>
+    </div>
+  </div>`;
+}
+
 function render(){
   const app = document.getElementById('app');
   if(state.connected && state.tab === 'settings' && !isAdmin()) state.tab = 'pos';
@@ -3143,6 +3262,7 @@ function render(){
     '<div class="hdr-right"><div class="hdr-col">' + nav + userBar + '</div>' + themeMarkup() + burger + '</div></header>' +
     scrim +
     body +
+    freeModalMarkup() +
     (state.toast ? '<div class="toast ' + (state.toast.isErr ? 'err' : '') + '">' + escapeHtml(state.toast.msg) + '</div>' : '');
 
   if(isViewer() && state.tab === 'pos'){
@@ -3242,6 +3362,33 @@ function render(){
       if(p) addToCart(p);
     });
   });
+
+  app.querySelectorAll('[data-free]').forEach(b=>{
+    b.addEventListener('click', (ev)=>{ ev.stopPropagation(); openFreePrompt(b.dataset.free); });
+  });
+  if(state.freePrompt){
+    const fpRem = document.getElementById('fp-remarks');
+    const fpQty = document.getElementById('fp-qty');
+    if(fpRem){
+      fpRem.addEventListener('input', ()=>{ state.freePrompt.remarks = fpRem.value; });
+      fpRem.addEventListener('keydown', ev=>{ if(ev.key === 'Enter') confirmFreePrompt(); });
+      if(state.freePrompt.focus){ state.freePrompt.focus = false; fpRem.focus(); }
+    }
+    if(fpQty) fpQty.addEventListener('input', ()=>{ state.freePrompt.qty = fpQty.value; });
+    app.querySelectorAll('[data-free-chip]').forEach(b=>{
+      b.addEventListener('click', ()=>{
+        const t = b.dataset.freeChip + ': ';
+        state.freePrompt.remarks = t;
+        if(fpRem){ fpRem.value = t; fpRem.focus(); fpRem.setSelectionRange(t.length, t.length); }
+      });
+    });
+    const fpAdd = document.getElementById('fp-add');
+    if(fpAdd) fpAdd.addEventListener('click', confirmFreePrompt);
+    const fpCancel = document.getElementById('fp-cancel');
+    if(fpCancel) fpCancel.addEventListener('click', ()=>{ state.freePrompt = null; render(); });
+    const fpScrim = document.getElementById('free-scrim');
+    if(fpScrim) fpScrim.addEventListener('click', ()=>{ state.freePrompt = null; render(); });
+  }
 
   app.querySelectorAll('[data-inc]').forEach(b=> b.addEventListener('click', ()=> changeQty(b.dataset.inc, 1)));
   app.querySelectorAll('[data-dec]').forEach(b=> b.addEventListener('click', ()=> changeQty(b.dataset.dec, -1)));
@@ -3637,6 +3784,7 @@ const navStack = [];
 let lastBackAt = 0;
 function pushGuard(){ try{ history.pushState({ccfaco:1}, ''); }catch(e){} }
 function closeTopOverlay(){
+  if(state.freePrompt){ state.freePrompt = null; render(); return true; }
   if(state.themeOpen){ setThemeOpen(false); return true; }
   if(state.menuOpen){ state.menuOpen = false; render(); return true; }
   if(state.reportMenuOpen){ state.reportMenuOpen = false; render(); return true; }
