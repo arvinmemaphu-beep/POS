@@ -351,6 +351,9 @@
   .tag.open{ border-color: var(--gold-dim); color: var(--gold); }
   .tag.closed{ border-color: var(--green); color: var(--green); }
   .tag.free{ border-color: var(--gold); color: var(--gold); font-weight:600; }
+  .tag.void{ border-color: var(--red); color: var(--red); font-weight:700; }
+  .void-note{ margin-top:6px; font-size:13px; color: var(--red); line-height:1.4; }
+  .void-btn{ margin-top:8px; padding:6px 12px; font-size:13px; border-color: var(--red) !important; color: var(--red) !important; }
   .free-note{ font-size:12.5px; color: var(--ink-dim); margin-top:3px; font-weight:400; }
   .cart-row.free{ border-left-color: var(--gold); }
   .free-btn{ background:none; border:1px solid var(--gold-dim); color:var(--gold); border-radius:14px; padding:4px 10px; font-size:13px; font-weight:600; cursor:pointer; white-space:nowrap; font-family:inherit; }
@@ -527,6 +530,8 @@ const state = {
   salesYear: null,        // {year, months:[12 sales totals], days:{'M-D': total}} for the year of the picked month
   reportMenuOpen: false,  // true while the Report dropdown (Daily / Monthly / History) is open
   lastBackup: '',         // ISO time of the last backup downloaded from this device
+  voidCol: false,         // true once sales / ledger_entries / consignments have the void columns (see Settings SQL)
+  voidPrompt: null,       // {kind, id, label, reason, busy} while the Void reason popup is open (Admin-only)
 };
 
 function el(html){
@@ -632,7 +637,7 @@ async function restoreAuth(){
     await fetchCurrentUser();
     await loadProfile();
     const ok = await testConnection();
-    if(ok){ await checkDiscountColumn(); await checkFreeColumn(); await checkConsignMemberColumn(); await checkLedgerReady(); await checkLedgerDepositColumn(); await fetchProducts(); await fetchMembers(); }
+    if(ok){ await checkDiscountColumn(); await checkFreeColumn(); await checkConsignMemberColumn(); await checkLedgerReady(); await checkLedgerDepositColumn(); await checkVoidColumn(); await fetchProducts(); await fetchMembers(); }
     return ok;
   }catch(e){
     clearSession();
@@ -668,6 +673,7 @@ async function login(email, password){
     await checkConsignMemberColumn();
     await checkLedgerReady();
     await checkLedgerDepositColumn();
+    await checkVoidColumn();
     state.tab = 'pos';
     navStack.length = 0;
     await fetchProducts();
@@ -778,9 +784,9 @@ async function fetchSaleItems(){
   if(!state.connected) return;
   state.loading = true; render();
   try{
-    const res = await fetch(`${state.supaUrl}/rest/v1/sale_items?select=*,sales(created_at)&order=created_at.desc&limit=500`, { headers: supaHeaders() });
+    const res = await fetch(`${state.supaUrl}/rest/v1/sale_items?select=*,sales(created_at${state.voidCol ? ',voided' : ''})&order=created_at.desc&limit=500`, { headers: supaHeaders() });
     if(!res.ok) throw new Error('Failed to load sale items');
-    state.saleItems = await res.json();
+    state.saleItems = (await res.json()).filter(it => !(it.sales && it.sales.voided)); // voided sales are left out of the Daily report
   }catch(e){
     showToast('Could not load sale items: ' + e.message, true);
   }
@@ -922,14 +928,16 @@ async function exportHistoryToExcel(){
     ]);
     if(sales.length === 0 && consignments.length === 0){ showToast('Wala pang data na i-eexport.', true); return; }
 
-    const salesSummary = sales.map(s => {
+    const voidedSales = sales.filter(s => s.voided);
+    const liveSales = sales.filter(s => !s.voided);
+    const salesSummary = liveSales.map(s => {
       const d = new Date(s.created_at);
       const items = (s.sale_items || []).map(i => `${i.qty}x ${i.product_name}${i.is_free ? ' (FREE' + (i.free_remarks ? ': ' + i.free_remarks : '') + ')' : ''}`).join(', ');
       return { Date: d.toLocaleDateString(), Time: d.toLocaleTimeString(), Items: items, Total: Number(s.total) };
     });
 
     const saleItemRows = [];
-    sales.forEach(s => {
+    liveSales.forEach(s => {
       const d = new Date(s.created_at);
       (s.sale_items || []).forEach(i => {
         saleItemRows.push({
@@ -952,7 +960,7 @@ async function exportHistoryToExcel(){
       return {
         'Date Sent': d.toLocaleDateString(), Time: d.toLocaleTimeString(),
         Consignee: c.consignee, Member: member ? member.full_name : '',
-        Status: c.status === 'closed' ? 'Settled' : 'Out',
+        Status: c.voided ? 'Voided' : (c.status === 'closed' ? 'Settled' : 'Out'),
         'Qty Sent': sent, 'Qty Sold': sold, 'Qty Returned': returned,
         'Sold Value': soldValue, Note: c.note || ''
       };
@@ -969,7 +977,7 @@ async function exportHistoryToExcel(){
           Product: i.product_name, 'Qty Sent': i.qty_sent, Price: Number(i.price),
           'Qty Sold': i.qty_sold||0, 'Qty Returned': i.qty_returned||0,
           'Sold Value': consignUnitPrice(i, c) * (i.qty_sold||0),
-          Status: c.status === 'closed' ? 'Settled' : 'Out'
+          Status: c.voided ? 'Voided' : (c.status === 'closed' ? 'Settled' : 'Out')
         });
       });
     });
@@ -979,6 +987,14 @@ async function exportHistoryToExcel(){
     XLSX.utils.book_append_sheet(wb, sheetOrEmpty(saleItemRows, 'No sale items yet'), 'Sale Items');
     XLSX.utils.book_append_sheet(wb, sheetOrEmpty(consignSummary, 'No consignments yet'), 'Consignments');
     XLSX.utils.book_append_sheet(wb, sheetOrEmpty(consignItemRows, 'No consignment items yet'), 'Consignment Items');
+    if(voidedSales.length){
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(voidedSales.map(s => {
+        const d = new Date(s.created_at);
+        return { Date: d.toLocaleDateString(), Time: d.toLocaleTimeString(),
+          Items: (s.sale_items || []).map(i => `${i.qty}x ${i.product_name}`).join(', '), Total: Number(s.total),
+          'Void Reason': s.void_reason || '', 'Voided By': s.voided_by || '', 'Voided At': s.voided_at ? new Date(s.voided_at).toLocaleString() : '' };
+      })), 'Voided Sales');
+    }
     XLSX.writeFile(wb, `CCFACO-Reports-${new Date().toISOString().slice(0,10)}.xlsx`);
     showToast('Excel report downloaded.');
   }catch(e){
@@ -1295,7 +1311,7 @@ async function logProductAction(action, productId, productName, details){
     });
     const res = await send(action);
     // if the database only allows the older action names, fall back so the log is never lost
-    if(!res.ok && String(action).indexOf('consign-') === 0) await send('stock-set');
+    if(!res.ok && /^(consign|void)-/.test(String(action))) await send('stock-set');
   }catch(e){ /* logging failure should never block a product operation */ }
 }
 
@@ -1433,7 +1449,7 @@ async function fetchLedger(){
 function ledgerWithBalances(){
   let bal = 0;
   return state.ledgerEntries.map(e => {
-    bal += (Number(e.amount_in)||0) - (Number(e.amount_out)||0);
+    if(!e.voided) bal += (Number(e.amount_in)||0) - (Number(e.amount_out)||0); // voided entries do not count
     return Object.assign({}, e, { balance: bal });
   });
 }
@@ -1504,6 +1520,233 @@ async function postSaleToLedger(saleId, total, itemsSummary){
     // non-fatal — the sale itself already succeeded, just log a soft warning
     console.warn('Could not post sale to ledger:', e.message);
   }
+}
+
+/* ---------- Void (Admin-only) ---------- */
+// Nothing is deleted: a voided sale / ledger entry / consignment stays in the database
+// marked VOIDED with a reason, who did it and when. Reports and the Ledger balance skip it.
+
+async function checkVoidColumn(){
+  try{
+    const a = await fetch(`${state.supaUrl}/rest/v1/sales?select=voided&limit=1`, { headers: supaHeaders() });
+    const b = await fetch(`${state.supaUrl}/rest/v1/consignments?select=voided,settle_sale_id&limit=1`, { headers: supaHeaders() });
+    let c = true;
+    if(state.ledgerReady){
+      const r = await fetch(`${state.supaUrl}/rest/v1/ledger_entries?select=voided&limit=1`, { headers: supaHeaders() });
+      c = r.ok;
+    }
+    state.voidCol = a.ok && b.ok && c;
+  }catch(e){
+    state.voidCol = false;
+  }
+}
+function notVoidedQ(){ return state.voidCol ? '&voided=is.false' : ''; }
+function voidStamp(reason){
+  return { voided: true, void_reason: reason, voided_at: new Date().toISOString(), voided_by: (state.user && state.user.email) ? state.user.email : null };
+}
+function voidNoteHtml(r){
+  const when = r.voided_at ? new Date(r.voided_at).toLocaleString() : '';
+  return `<div class="void-note">VOID: ${escapeHtml(r.void_reason || '(walang dahilan)')}${r.voided_by ? ' \u00B7 ' + escapeHtml(r.voided_by) : ''}${when ? ' \u00B7 ' + escapeHtml(when) : ''}</div>`;
+}
+// PATCH helper. With needRow it also fails loudly if the database silently updated nothing (blocked by RLS).
+async function patchRows(path, body, needRow){
+  const res = await fetch(`${state.supaUrl}/rest/v1/${path}`, { method:'PATCH', headers: supaHeaders(), body: JSON.stringify(body) });
+  let rows = [];
+  try{ rows = await res.json(); }catch(e){}
+  if(!res.ok) throw new Error((rows && rows.message) || ('HTTP ' + res.status));
+  if(needRow && (!Array.isArray(rows) || rows.length === 0)) throw new Error('Walang na-update. Kulang ang permission \u2014 i-run ang "Void" SQL sa Settings.');
+  return rows;
+}
+// map: product_id -> qty. sign +1 puts stock back, -1 takes it out. One stock change per product.
+async function adjustStockMap(map, sign, noteFn, action){
+  for(const pid of Object.keys(map)){
+    const prod = state.products.find(p => String(p.id) === String(pid));
+    if(!prod || !map[pid]) continue;
+    const next = Math.max(0, Math.floor((prod.stock || 0) + sign * map[pid]));
+    await setStock(prod.id, next, noteFn(map[pid]), action);
+    prod.stock = next;
+  }
+}
+function consignSoldValue(c){
+  return (c.consignment_items || []).reduce((sum, i) => sum + consignUnitPrice(i, c) * (i.qty_sold || 0), 0);
+}
+// Is this sale the one a settled consignment produced? (old settlements have no saved link, so match by time + total)
+function saleMatchesConsign(sale, c){
+  if(!c.settled_at || c.status !== 'closed' || c.voided) return false;
+  const dt = new Date(c.settled_at).getTime() - new Date(sale.created_at).getTime();
+  return dt > -5*60000 && dt < 15*60000 && Math.abs(consignSoldValue(c) - Number(sale.total)) < 0.01;
+}
+async function findSettleSale(c){
+  if(c.settle_sale_id) return { id: c.settle_sale_id };
+  if(!c.settled_at) return null;
+  const t = new Date(c.settled_at).getTime();
+  const from = encodeURIComponent(new Date(t - 15*60000).toISOString());
+  const to = encodeURIComponent(new Date(t + 5*60000).toISOString());
+  const res = await fetch(`${state.supaUrl}/rest/v1/sales?select=id,total,created_at&created_at=gte.${from}&created_at=lte.${to}&voided=is.false`, { headers: supaHeaders() });
+  if(!res.ok) return null;
+  const want = consignSoldValue(c);
+  const hits = (await res.json()).filter(x => Math.abs(Number(x.total) - want) < 0.01);
+  return hits.length === 1 ? hits[0] : null;
+}
+async function refreshAfterVoid(){
+  await fetchProducts();
+  await fetchSales();
+  await fetchSaleItems();
+  await fetchConsignments();
+  if(state.ledgerReady) await fetchLedger();
+}
+
+function openVoidPrompt(kind, id, label){
+  if(!isAdmin()){ showToast('Admin lang ang puwedeng mag-void.', true); return; }
+  if(!state.voidCol){ showToast('I-run muna ang "Void" SQL sa Settings tab.', true); return; }
+  state.voidPrompt = { kind, id, label: label || '', reason: '', busy: false, focus: true };
+  render();
+}
+async function confirmVoid(){
+  const vp = state.voidPrompt;
+  if(!vp || vp.busy) return;
+  const reason = (vp.reason || '').trim();
+  if(!reason){ showToast('Isulat muna ang dahilan (remarks) ng void.', true); return; }
+  vp.busy = true; render();
+  let ok = false;
+  try{
+    if(vp.kind === 'sale') ok = await voidSale(vp.id, reason);
+    else if(vp.kind === 'consign-sent') ok = await voidConsignSent(vp.id, reason);
+    else if(vp.kind === 'consign-settle') ok = await voidConsignSettlement(vp.id, reason);
+    else if(vp.kind === 'ledger') ok = await voidLedgerEntry(vp.id, reason);
+  }catch(e){
+    showToast('Void failed: ' + e.message, true);
+  }
+  if(ok) state.voidPrompt = null; else if(state.voidPrompt) state.voidPrompt.busy = false;
+  render();
+}
+
+async function voidSale(saleId, reason){
+  if(!isAdmin()) throw new Error('Admin lang ang puwedeng mag-void.');
+  const sale = state.sales.find(s => s.id === saleId);
+  if(!sale) throw new Error('Hindi mahanap ang sale. I-refresh ang History.');
+  if(sale.voided) throw new Error('Na-void na ang sale na ito.');
+
+  // a sale made by settling a consignment is voided together with that settlement
+  const linked = state.consignments.find(c => c.settle_sale_id === saleId && !c.voided && c.status === 'closed')
+    || state.consignments.find(c => saleMatchesConsign(sale, c));
+  if(linked) return await voidConsignSettlement(linked.id, reason);
+
+  // an older consignment sale with no saved link: void the sale + ledger but do NOT touch stock
+  // (consignment pieces were taken out of stock when sent, not when settled)
+  let isConsignSale = false;
+  if(state.ledgerReady){
+    const r = await fetch(`${state.supaUrl}/rest/v1/ledger_entries?select=details&sale_id=eq.${saleId}`, { headers: supaHeaders() });
+    if(r.ok) isConsignSale = (await r.json()).some(x => /^Sale: Consignment/i.test(x.details || ''));
+  }
+
+  await patchRows(`sales?id=eq.${saleId}`, voidStamp(reason), true);
+  if(state.ledgerReady) await patchRows(`ledger_entries?sale_id=eq.${saleId}`, voidStamp(reason));
+
+  if(!isConsignSale){
+    const r = await fetch(`${state.supaUrl}/rest/v1/sale_items?select=product_id,product_name,qty&sale_id=eq.${saleId}`, { headers: supaHeaders() });
+    if(!r.ok) throw new Error('Na-void ang sale pero hindi ma-load ang items para ibalik ang stock. Ibalik ang stock manual.');
+    const map = {};
+    (await r.json()).forEach(i => {
+      let pid = i.product_id;
+      if(!pid){ const p = state.products.find(x => x.name === i.product_name); pid = p ? p.id : null; }
+      if(pid) map[pid] = (map[pid] || 0) + (Number(i.qty) || 0);
+    });
+    await adjustStockMap(map, +1, q => 'Sale voided (+' + q + ')', 'void-sale');
+  }
+  await refreshAfterVoid();
+  showToast(isConsignSale
+    ? 'Sale at Ledger na-void. Hindi ginalaw ang stock (consignment sale ito); i-void ang settlement sa Consign tab kung kailangang i-reopen.'
+    : 'Sale na-void. Naibalik ang stock.');
+  return true;
+}
+
+async function voidConsignSent(consignId, reason){
+  if(!isAdmin()) throw new Error('Admin lang ang puwedeng mag-void.');
+  const c = state.consignments.find(x => x.id === consignId);
+  if(!c) throw new Error('Hindi mahanap ang consignment. I-refresh ang Consign tab.');
+  if(c.voided) throw new Error('Na-void na ang consignment na ito.');
+  if(c.status === 'closed') throw new Error('Settled na ito \u2014 gamitin ang "Void settlement".');
+  await patchRows(`consignments?id=eq.${consignId}`, voidStamp(reason), true);
+  const map = {};
+  (c.consignment_items || []).forEach(i => { if(i.product_id) map[i.product_id] = (map[i.product_id] || 0) + (Number(i.qty_sent) || 0); });
+  await adjustStockMap(map, +1, q => 'Consignment - voided (+' + q + ')', 'void-consign');
+  await refreshAfterVoid();
+  showToast('Consignment na-void. Naibalik sa stock ang lahat ng naipadala.');
+  return true;
+}
+
+async function voidConsignSettlement(consignId, reason){
+  if(!isAdmin()) throw new Error('Admin lang ang puwedeng mag-void.');
+  const c = state.consignments.find(x => x.id === consignId);
+  if(!c) throw new Error('Hindi mahanap ang consignment. I-refresh ang Consign tab.');
+  if(c.voided || c.status !== 'closed') throw new Error('Hindi pa settled ang consignment na ito.');
+  const items = c.consignment_items || [];
+
+  // 1) void the sale + ledger entry that the settlement created
+  let sale = null;
+  if(consignSoldValue(c) > 0){
+    sale = await findSettleSale(c);
+    if(sale){
+      await patchRows(`sales?id=eq.${sale.id}`, voidStamp(reason), true);
+      if(state.ledgerReady) await patchRows(`ledger_entries?sale_id=eq.${sale.id}`, voidStamp(reason));
+    }
+  }
+  // 2) take back the pieces that were returned to stock at settlement
+  const map = {};
+  items.forEach(i => { if(i.product_id && i.qty_returned) map[i.product_id] = (map[i.product_id] || 0) + (Number(i.qty_returned) || 0); });
+  await adjustStockMap(map, -1, q => 'Consignment return voided (-' + q + ')', 'void-consign');
+  // 3) clear the tally and reopen the consignment so it can be settled again, correctly
+  for(const i of items){
+    await patchRows(`consignment_items?id=eq.${i.id}`, { qty_sold: 0, qty_returned: 0 });
+  }
+  const stampNote = (c.note ? c.note + ' \u00B7 ' : '') + 'Settlement voided ' + new Date().toLocaleDateString() + ': ' + reason;
+  await patchRows(`consignments?id=eq.${consignId}`, { status: 'open', settled_at: null, settle_sale_id: null, note: stampNote }, true);
+  items.forEach(i => { delete state.settle[i.id]; });
+
+  await refreshAfterVoid();
+  showToast(consignSoldValue(c) > 0 && !sale
+    ? 'Na-reopen ang consignment, pero hindi ko mahanap ang sale/Ledger nito. I-void iyon manual sa History.'
+    : 'Settlement na-void. Naka-"Out" ulit ang consignment \u2014 i-settle ulit nang tama.');
+  return true;
+}
+
+async function voidLedgerEntry(id, reason){
+  if(!isAdmin()) throw new Error('Admin lang ang puwedeng mag-void.');
+  const e = state.ledgerEntries.find(x => x.id === id);
+  if(!e) throw new Error('Hindi mahanap ang entry. I-refresh ang Ledger.');
+  if(e.voided) throw new Error('Na-void na ang entry na ito.');
+  if(e.source === 'sale') throw new Error('Ito ay galing sa Sale \u2014 i-void ang sale sa History o Consign.');
+  await patchRows(`ledger_entries?id=eq.${id}`, voidStamp(reason), true);
+  state.expenseEntries = state.expenseEntries.filter(x => x.id !== id);
+  await fetchLedger();
+  showToast('Ledger entry na-void.');
+  return true;
+}
+
+function voidModalMarkup(){
+  const vp = state.voidPrompt;
+  if(!vp) return '';
+  const titles = { 'sale':'Void sale', 'consign-sent':'Void consignment', 'consign-settle':'Void settlement', 'ledger':'Void ledger entry' };
+  const notes = {
+    'sale': 'Ibabalik sa stock ang mga item nito, at hindi na isasama sa Daily, Monthly report at Ledger. Mananatili ito sa History bilang VOIDED.',
+    'consign-sent': 'Ibabalik sa stock ang lahat ng naipadala. Mamarkahang VOIDED ang consignment at hindi na ito puwedeng i-settle.',
+    'consign-settle': 'Ibabalik ang consignment sa "Out" para ma-settle ulit nang tama. Ive-void ang sale at Ledger entry nito, at babawiin sa stock ang mga ibinalik.',
+    'ledger': 'Hindi na isasama sa Ledger balance at Expense report. Mananatili sa listahan bilang VOIDED.'
+  };
+  const chips = ['Maling encode', 'Dapat Member pala', 'Maling presyo/discount', 'Test lang'].map(t => `<button type="button" class="chip" data-void-chip="${t}">${t}</button>`).join('');
+  return `
+  <div class="free-scrim" id="void-scrim"></div>
+  <div class="free-modal" role="dialog" aria-modal="true" aria-label="Void">
+    <h2>\u26D4 ${titles[vp.kind] || 'Void'}</h2>
+    <div class="setup-note" style="margin-bottom:12px;"><b>${escapeHtml(vp.label)}</b><br>${notes[vp.kind] || ''}</div>
+    <div class="field"><label>Dahilan / Remarks (kailangan)</label><input id="void-reason" placeholder="hal. Maling encode, dapat Member pala" value="${escapeHtml(vp.reason)}" autocomplete="off"></div>
+    <div class="chips">${chips}</div>
+    <div style="display:flex; gap:8px; margin-top:14px;">
+      <button class="primary" id="void-confirm" style="flex:1; margin-top:0;" ${vp.busy ? 'disabled' : ''}>${vp.busy ? 'Voiding...' : 'Confirm void'}</button>
+      <button class="ghost" id="void-cancel" style="flex:1;" ${vp.busy ? 'disabled' : ''}>Cancel</button>
+    </div>
+  </div>`;
 }
 
 /* ---------- Consignment ---------- */
@@ -1618,6 +1861,7 @@ async function settleConsignment(consignment){
   }
   const soldTotal = rows.reduce((s,r)=> s + consignUnitPrice(r.it, consignment)*r.sold, 0);
   state.busy = true; render();
+  let settleSaleId = null;
   try{
     // record the sold pieces as a real sale so revenue reports stay correct
     if(soldTotal > 0){
@@ -1626,6 +1870,7 @@ async function settleConsignment(consignment){
       });
       if(!saleRes.ok) throw new Error('Could not record the sale');
       const saleId = (await saleRes.json())[0].id;
+      settleSaleId = saleId;
       const saleItems = rows.filter(r=>r.sold>0).map(r=>({
         sale_id: saleId, product_id: r.it.product_id, product_name: r.it.product_name,
         price: consignUnitPrice(r.it, consignment), qty: r.sold
@@ -1655,7 +1900,7 @@ async function settleConsignment(consignment){
 
     const cRes = await fetch(`${state.supaUrl}/rest/v1/consignments?id=eq.${consignment.id}`, {
       method:'PATCH', headers: supaHeaders(),
-      body: JSON.stringify({ status: 'closed', settled_at: new Date().toISOString() })
+      body: JSON.stringify(Object.assign({ status: 'closed', settled_at: new Date().toISOString() }, state.voidCol ? { settle_sale_id: settleSaleId } : {}))
     });
     if(!cRes.ok) throw new Error('Could not close the consignment');
 
@@ -2418,6 +2663,38 @@ revoke all on function public.admin_delete_user(uuid) from public, anon;
 grant execute on function public.admin_delete_user(uuid) to authenticated;
 notify pgrst, 'reload schema';</code>
       </div>
+
+      <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
+        <h2>Void (Admin lang)</h2>
+        <div class="setup-note">I-run ito nang isang beses para gumana ang <b>Void</b>: sa Sales History, sa Consign (naipadala pa lang o na-settle na), at sa manual na Ledger entries. Walang binubura &mdash; namamarkahang VOIDED ito kasama ang dahilan, kung sino, at kailan. Hindi na isasama sa Daily/Monthly report, Expense report at Ledger balance. Ang settlement ng consignment na na-void ay babalik sa &ldquo;Out&rdquo; para ma-settle ulit nang tama.</div>
+        <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">alter table sales add column if not exists voided boolean not null default false;
+alter table sales add column if not exists void_reason text;
+alter table sales add column if not exists voided_at timestamptz;
+alter table sales add column if not exists voided_by text;
+
+alter table ledger_entries add column if not exists voided boolean not null default false;
+alter table ledger_entries add column if not exists void_reason text;
+alter table ledger_entries add column if not exists voided_at timestamptz;
+alter table ledger_entries add column if not exists voided_by text;
+
+alter table consignments add column if not exists voided boolean not null default false;
+alter table consignments add column if not exists void_reason text;
+alter table consignments add column if not exists voided_at timestamptz;
+alter table consignments add column if not exists voided_by text;
+alter table consignments add column if not exists settle_sale_id uuid references sales(id) on delete set null;
+
+drop policy if exists "admin can void sales" on sales;
+create policy "admin can void sales" on sales for update to authenticated
+  using (public.current_user_role() = 'admin')
+  with check (public.current_user_role() = 'admin');
+
+drop policy if exists "admin can void consignments" on consignments;
+create policy "admin can void consignments" on consignments for update to authenticated
+  using (public.current_user_role() = 'admin')
+  with check (public.current_user_role() = 'admin');
+
+notify pgrst, 'reload schema';</code>
+      </div>
     </div>
   </div>`;
 }
@@ -2625,15 +2902,16 @@ function renderLedger(){
   const listRows = rows.slice().reverse().map(e => {
     const dateLabel = e.entry_date ? e.entry_date : '';
     return `
-    <div class="sale-row">
+    <div class="sale-row" ${e.voided ? 'style="opacity:0.65;"' : ''}>
       <div class="head">
-        <span>${escapeHtml(dateLabel)}${e.qty ? ' \u00B7 ' + escapeHtml(e.qty) : ''}${e.pic ? ' \u00B7 ' + escapeHtml(e.pic) : ''}${e.source === 'sale' ? ' <span class="tag closed">Sale</span>' : ''}${e.is_deposit ? ' <span class="tag">Deposit</span>' : ''}</span>
+        <span>${escapeHtml(dateLabel)}${e.qty ? ' \u00B7 ' + escapeHtml(e.qty) : ''}${e.pic ? ' \u00B7 ' + escapeHtml(e.pic) : ''}${e.source === 'sale' ? ' <span class="tag closed">Sale</span>' : ''}${e.is_deposit ? ' <span class="tag">Deposit</span>' : ''}${e.voided ? ' <span class="tag void">VOIDED</span>' : ''}</span>
         <span class="amt mono">${money(e.balance)}</span>
       </div>
       <div class="items" style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
-        <span>${escapeHtml(e.details)}${Number(e.amount_in)>0 ? ' \u00B7 <span style="color:var(--pos);">+' + money(e.amount_in) + '</span>' : ''}${Number(e.amount_out)>0 ? ' \u00B7 <span style="color:var(--neg);">-' + money(e.amount_out) + '</span>' : ''}</span>
-        ${(isAdmin() && state.ledgerDepositCol && Number(e.amount_out) > 0) ? `<button class="icon-btn" data-toggle-deposit="${e.id}" data-deposit-now="${e.is_deposit ? '1' : '0'}" title="${e.is_deposit ? 'Unmark as deposit' : 'Mark as cash deposit (exclude from Expense Report)'}">${e.is_deposit ? '\u2713' : '\u270E'}</button>` : ''}
+        <span ${e.voided ? 'style="text-decoration:line-through;"' : ''}>${escapeHtml(e.details)}${Number(e.amount_in)>0 ? ' \u00B7 <span style="color:var(--pos);">+' + money(e.amount_in) + '</span>' : ''}${Number(e.amount_out)>0 ? ' \u00B7 <span style="color:var(--neg);">-' + money(e.amount_out) + '</span>' : ''}</span>
+        ${(isAdmin() && !e.voided && state.ledgerDepositCol && Number(e.amount_out) > 0) ? `<button class="icon-btn" data-toggle-deposit="${e.id}" data-deposit-now="${e.is_deposit ? '1' : '0'}" title="${e.is_deposit ? 'Unmark as deposit' : 'Mark as cash deposit (exclude from Expense Report)'}">${e.is_deposit ? '\u2713' : '\u270E'}</button>` : ''}
       </div>
+      ${e.voided ? voidNoteHtml(e) : ((isAdmin() && state.voidCol && e.source !== 'sale') ? `<button class="ghost void-btn" data-void-ledger="${e.id}">Void entry</button>` : '')}
     </div>`;
   }).join('') || (lq ? `<div class="empty">No ledger entries match your search.</div>` : `<div class="empty">No ledger entries yet.</div>`);
 
@@ -2676,7 +2954,7 @@ async function loadSalesYear(y){
   const ys = encodeURIComponent(new Date(y, 0, 1).toISOString()), ye = encodeURIComponent(new Date(y + 1, 0, 1).toISOString());
   const months = new Array(12).fill(0), days = {}, step = 1000;
   for(let from = 0; ; from += step){
-    const res = await fetch(`${state.supaUrl}/rest/v1/sales?select=created_at,total&created_at=gte.${ys}&created_at=lt.${ye}&order=created_at.asc`,
+    const res = await fetch(`${state.supaUrl}/rest/v1/sales?select=created_at,total&created_at=gte.${ys}&created_at=lt.${ye}${notVoidedQ()}&order=created_at.asc`,
       { headers: Object.assign({}, supaHeaders(), { 'Range-Unit':'items', 'Range': `${from}-${from+step-1}` }) });
     if(!res.ok) throw new Error('Failed to load yearly sales');
     const rows = await res.json();
@@ -2701,7 +2979,7 @@ async function loadExpenseEntries(){
     all.push(...rows);
     if(rows.length < step) break;
   }
-  return all.filter(e => !e.is_deposit);
+  return all.filter(e => !e.is_deposit && !e.voided); // voided entries are not expenses
 }
 function shiftReportMonth(delta){
   const r = reportRange();
@@ -2720,7 +2998,7 @@ async function fetchReport(){
     const all = [];
     const step = 1000;
     for(let from = 0; ; from += step){
-      const res = await fetch(`${state.supaUrl}/rest/v1/sales?select=created_at,total,sale_items(${saleItemCols()})&${range('created_at')}&order=created_at.asc`,
+      const res = await fetch(`${state.supaUrl}/rest/v1/sales?select=created_at,total,sale_items(${saleItemCols()})&${range('created_at')}${notVoidedQ()}&order=created_at.asc`,
         { headers: Object.assign({}, supaHeaders(), { 'Range-Unit':'items', 'Range': `${from}-${from+step-1}` }) });
       if(!res.ok) throw new Error('Failed to load sales');
       const rows = await res.json();
@@ -3092,13 +3370,15 @@ function renderHistory(){
   const rows = visibleSales.map(s => {
     const d = new Date(s.created_at);
     const itemsStr = (s.sale_items||[]).map(saleItemLabel).join(', ');
+    const vd = !!s.voided;
     return `
-    <div class="sale-row">
+    <div class="sale-row" ${vd ? 'style="opacity:0.65;"' : ''}>
       <div class="head">
-        <span>${d.toLocaleString()}</span>
-        <span class="amt mono">${money(s.total)}</span>
+        <span>${d.toLocaleString()}${vd ? ' <span class="tag void">VOIDED</span>' : ''}</span>
+        <span class="amt mono" ${vd ? 'style="text-decoration:line-through;"' : ''}>${money(s.total)}</span>
       </div>
       <div class="items">${itemsStr}</div>
+      ${vd ? voidNoteHtml(s) : ((isAdmin() && state.voidCol) ? `<button class="ghost void-btn" data-void-sale="${s.id}">Void</button>` : '')}
     </div>`;
   }).join('') || (q ? `<div class="empty">No sales match your search.</div>` : `<div class="empty">No sales yet.</div>`);
 
@@ -3187,7 +3467,8 @@ function renderConsign(){
   const history = state.consignments.map(c => {
     const items = c.consignment_items || [];
     const dt = new Date(c.created_at);
-    const open = c.status !== 'closed';
+    const voided = !!c.voided;
+    const open = !voided && c.status !== 'closed';
     // search filter: consignee, product names, member name, note
     if(state.consignSearch.trim()){
       const cq = state.consignSearch.trim().toLowerCase();
@@ -3236,7 +3517,7 @@ function renderConsign(){
           </div>
         </div>`;
       }
-      const left = (i.qty_sent||0) - (i.qty_sold||0) - (i.qty_returned||0);
+      const left = voided ? 0 : (i.qty_sent||0) - (i.qty_sold||0) - (i.qty_returned||0);
       return `
         <div class="cons-item">
           <div class="nm">${nameLabel}
@@ -3249,12 +3530,15 @@ function renderConsign(){
     return `
     <div class="sale-row">
       <div class="head">
-        <span>${c.consignee}${linkedMember ? ' \u00B7 <span class="tag" style="border-color:var(--gold-dim); color:var(--gold);">Member: ' + escapeHtml(linkedMember.full_name) + '</span>' : ''} <span class="tag ${open?'open':'closed'}">${open?'Out':'Settled'}</span></span>
+        <span>${c.consignee}${linkedMember ? ' \u00B7 <span class="tag" style="border-color:var(--gold-dim); color:var(--gold);">Member: ' + escapeHtml(linkedMember.full_name) + '</span>' : ''} ${voided ? '<span class="tag void">VOIDED</span>' : `<span class="tag ${open?'open':'closed'}">${open?'Out':'Settled'}</span>`}</span>
         <span class="amt mono">${money(soldValue)}</span>
       </div>
-      <div class="items">${dt.toLocaleString()} \u00B7 ${sent} pcs sent${open ? '' : ' \u00B7 ' + sold + ' sold \u00B7 ' + ret + ' returned'}${c.note ? ' \u00B7 ' + c.note : ''}</div>
+      <div class="items">${dt.toLocaleString()} \u00B7 ${sent} pcs sent${(open || voided) ? '' : ' \u00B7 ' + sold + ' sold \u00B7 ' + ret + ' returned'}${c.note ? ' \u00B7 ' + c.note : ''}</div>
       ${itemRows}
       ${open ? `<button class="primary" data-settle="${c.id}" ${state.busy?'disabled':''}>${state.busy ? 'Saving...' : 'Record sold / returned'}</button>` : ''}
+      ${voided ? voidNoteHtml(c) : ((isAdmin() && state.voidCol) ? (open
+        ? `<button class="ghost void-btn" data-void-consign="${c.id}" data-void-mode="sent">Void consignment</button>`
+        : `<button class="ghost void-btn" data-void-consign="${c.id}" data-void-mode="settle">Void settlement (ibalik sa Out)</button>`) : '')}
     </div>`;
   }).join('') || (state.consignSearch.trim() ? `<div class="empty">No consignments match your search.</div>` : `<div class="empty">No consignments yet.</div>`);
 
@@ -3421,6 +3705,7 @@ function render(){
     scrim +
     body +
     freeModalMarkup() +
+    voidModalMarkup() +
     pwModalMarkup() +
     (state.toast ? '<div class="toast ' + (state.toast.isErr ? 'err' : '') + '">' + escapeHtml(state.toast.msg) + '</div>' : '');
 
@@ -3548,6 +3833,45 @@ function render(){
     const fpScrim = document.getElementById('free-scrim');
     if(fpScrim) fpScrim.addEventListener('click', ()=>{ state.freePrompt = null; render(); });
   }
+
+  if(state.voidPrompt){
+    const vr = document.getElementById('void-reason');
+    if(vr){
+      vr.addEventListener('input', ()=>{ state.voidPrompt.reason = vr.value; });
+      vr.addEventListener('keydown', ev=>{ if(ev.key === 'Enter') confirmVoid(); });
+      if(state.voidPrompt.focus){ state.voidPrompt.focus = false; vr.focus(); }
+    }
+    app.querySelectorAll('[data-void-chip]').forEach(b=>{
+      b.addEventListener('click', ()=>{
+        state.voidPrompt.reason = b.dataset.voidChip;
+        if(vr){ vr.value = b.dataset.voidChip; vr.focus(); }
+      });
+    });
+    const vc = document.getElementById('void-confirm');
+    if(vc) vc.addEventListener('click', confirmVoid);
+    const vx = document.getElementById('void-cancel');
+    if(vx) vx.addEventListener('click', ()=>{ state.voidPrompt = null; render(); });
+    const vs = document.getElementById('void-scrim');
+    if(vs) vs.addEventListener('click', ()=>{ if(!state.voidPrompt.busy){ state.voidPrompt = null; render(); } });
+  }
+  app.querySelectorAll('[data-void-sale]').forEach(b=>{
+    b.addEventListener('click', ()=>{
+      const sv = state.sales.find(x=>x.id===b.dataset.voidSale);
+      if(sv) openVoidPrompt('sale', sv.id, new Date(sv.created_at).toLocaleString() + ' \u00B7 ' + money(sv.total));
+    });
+  });
+  app.querySelectorAll('[data-void-consign]').forEach(b=>{
+    b.addEventListener('click', ()=>{
+      const cv = state.consignments.find(x=>x.id===b.dataset.voidConsign);
+      if(cv) openVoidPrompt(b.dataset.voidMode === 'settle' ? 'consign-settle' : 'consign-sent', cv.id, (cv.consignee || 'consignee') + ' \u00B7 ' + new Date(cv.created_at).toLocaleDateString());
+    });
+  });
+  app.querySelectorAll('[data-void-ledger]').forEach(b=>{
+    b.addEventListener('click', ()=>{
+      const lv = state.ledgerEntries.find(x=>x.id===b.dataset.voidLedger);
+      if(lv) openVoidPrompt('ledger', lv.id, (lv.entry_date || '') + ' \u00B7 ' + (lv.details || ''));
+    });
+  });
 
   app.querySelectorAll('[data-inc]').forEach(b=> b.addEventListener('click', ()=> changeQty(b.dataset.inc, 1)));
   app.querySelectorAll('[data-dec]').forEach(b=> b.addEventListener('click', ()=> changeQty(b.dataset.dec, -1)));
@@ -3968,6 +4292,7 @@ const navStack = [];
 let lastBackAt = 0;
 function pushGuard(){ try{ history.pushState({ccfaco:1}, ''); }catch(e){} }
 function closeTopOverlay(){
+  if(state.voidPrompt){ if(!state.voidPrompt.busy){ state.voidPrompt = null; render(); } return true; }
   if(state.pwPrompt){ state.pwPrompt = null; render(); return true; }
   if(state.freePrompt){ state.freePrompt = null; render(); return true; }
   if(state.themeOpen){ setThemeOpen(false); return true; }
