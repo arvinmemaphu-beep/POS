@@ -1634,6 +1634,10 @@ async function settleConsignment(consignment){
         method:'POST', headers: supaHeaders(), body: JSON.stringify(saleItems)
       });
       if(!siRes.ok) throw new Error('Could not record sale items');
+      // post the consignment sale to the cash ledger too, like regular checkout does
+      const itemsSummary = rows.filter(r=>r.sold>0).map(r=> r.sold + 'x ' + r.it.product_name).join(', ');
+      await postSaleToLedger(saleId, soldTotal, 'Consignment – ' + (consignment.consignee || 'consignee') + ': ' + itemsSummary);
+      if(state.tab === 'ledger') await fetchLedger();
     }
 
     for(const r of rows){
