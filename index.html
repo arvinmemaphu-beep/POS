@@ -1592,6 +1592,24 @@ async function findSettleSale(c){
   const hits = (await res.json()).filter(x => Math.abs(Number(x.total) - want) < 0.01);
   return hits.length === 1 ? hits[0] : null;
 }
+// Marks the Ledger entry of a sale as VOIDED. Looks it up by sale_id first; if that finds nothing, falls back to
+// matching amount + time. Returns false when no entry could be updated (so the caller can warn).
+async function voidLedgerForSale(saleId, total, createdAt, reason){
+  if(!state.ledgerReady) return true;
+  if(!(Number(total) > 0)) return true; // all-free sales have no ledger entry
+  let rows = await patchRows(`ledger_entries?sale_id=eq.${saleId}&voided=is.false`, voidStamp(reason));
+  if(rows.length) return true;
+  if(!createdAt) return false;
+  const t = new Date(createdAt).getTime();
+  const from = encodeURIComponent(new Date(t - 3*60000).toISOString());
+  const to = encodeURIComponent(new Date(t + 3*60000).toISOString());
+  const res = await fetch(`${state.supaUrl}/rest/v1/ledger_entries?select=id,amount_in&source=eq.sale&voided=is.false&created_at=gte.${from}&created_at=lte.${to}`, { headers: supaHeaders() });
+  if(!res.ok) return false;
+  const hits = (await res.json()).filter(x => Math.abs(Number(x.amount_in) - Number(total)) < 0.01);
+  if(hits.length !== 1) return false;
+  rows = await patchRows(`ledger_entries?id=eq.${hits[0].id}`, voidStamp(reason));
+  return rows.length > 0;
+}
 async function refreshAfterVoid(){
   await fetchProducts();
   await fetchSales();
@@ -1633,7 +1651,14 @@ async function voidSale(saleId, reason){
     if(r0.ok){ const a0 = await r0.json(); sale = a0[0]; }
   }
   if(!sale) throw new Error('Hindi mahanap ang sale. I-refresh ang History.');
-  if(sale.voided) throw new Error('Na-void na ang sale na ito.');
+  if(sale.voided){
+    // the sale itself is already voided; only (re)try its Ledger entry
+    const okL = await voidLedgerForSale(saleId, sale.total, sale.created_at, reason);
+    if(!okL) throw new Error('Na-void na ang sale, pero hindi ma-void ang Ledger entry (baka naka-block ng permission). I-run ang "Ledger fix" SQL.');
+    await refreshAfterVoid();
+    showToast('Ledger entry na-void.');
+    return true;
+  }
 
   // a sale made by settling a consignment is voided together with that settlement
   const linked = state.consignments.find(c => c.settle_sale_id === saleId && !c.voided && c.status === 'closed')
@@ -1649,7 +1674,7 @@ async function voidSale(saleId, reason){
   }
 
   await patchRows(`sales?id=eq.${saleId}`, voidStamp(reason), true);
-  if(state.ledgerReady) await patchRows(`ledger_entries?sale_id=eq.${saleId}`, voidStamp(reason));
+  const ledgerOk = await voidLedgerForSale(saleId, sale.total, sale.created_at, reason);
 
   if(!isConsignSale){
     const r = await fetch(`${state.supaUrl}/rest/v1/sale_items?select=product_id,product_name,qty&sale_id=eq.${saleId}`, { headers: supaHeaders() });
@@ -1663,6 +1688,7 @@ async function voidSale(saleId, reason){
     await adjustStockMap(map, +1, q => 'Sale voided (+' + q + ')', 'void-sale');
   }
   await refreshAfterVoid();
+  if(!ledgerOk){ showToast('Na-void ang sale at naibalik ang stock, PERO hindi na-void ang Ledger entry. Pindutin ang "Void sale" sa Ledger row para subukan ulit.', true); return true; }
   showToast(isConsignSale
     ? 'Sale at Ledger na-void. Hindi ginalaw ang stock (consignment sale ito); i-void ang settlement sa Consign tab kung kailangang i-reopen.'
     : 'Sale na-void. Naibalik ang stock.');
@@ -1692,12 +1718,12 @@ async function voidConsignSettlement(consignId, reason){
   const items = c.consignment_items || [];
 
   // 1) void the sale + ledger entry that the settlement created
-  let sale = null;
+  let sale = null, ledgerOk2 = true;
   if(consignSoldValue(c) > 0){
     sale = await findSettleSale(c);
     if(sale){
       await patchRows(`sales?id=eq.${sale.id}`, voidStamp(reason), true);
-      if(state.ledgerReady) await patchRows(`ledger_entries?sale_id=eq.${sale.id}`, voidStamp(reason));
+      ledgerOk2 = await voidLedgerForSale(sale.id, consignSoldValue(c), sale.created_at, reason);
     }
   }
   // 2) take back the pieces that were returned to stock at settlement
@@ -1713,6 +1739,7 @@ async function voidConsignSettlement(consignId, reason){
   items.forEach(i => { delete state.settle[i.id]; });
 
   await refreshAfterVoid();
+  if(!ledgerOk2){ showToast('Na-reopen ang consignment, PERO hindi na-void ang Ledger entry. Pindutin ang "Void sale" sa Ledger row nito para subukan ulit.', true); return true; }
   showToast(consignSoldValue(c) > 0 && !sale
     ? 'Na-reopen ang consignment, pero hindi ko mahanap ang sale/Ledger nito. I-void iyon manual sa History.'
     : 'Settlement na-void. Naka-"Out" ulit ang consignment \u2014 i-settle ulit nang tama.');
