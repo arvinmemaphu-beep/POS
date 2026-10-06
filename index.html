@@ -546,6 +546,10 @@ function showToast(msg, isErr){
   setTimeout(()=>{ state.toast = null; render(); }, 3200);
 }
 
+function localDateStr(d){
+  d = d || new Date();
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+}
 function money(n){
   return '\u20B1' + Number(n).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
 }
@@ -995,7 +999,7 @@ async function exportHistoryToExcel(){
           'Void Reason': s.void_reason || '', 'Voided By': s.voided_by || '', 'Voided At': s.voided_at ? new Date(s.voided_at).toLocaleString() : '' };
       })), 'Voided Sales');
     }
-    XLSX.writeFile(wb, `CCFACO-Reports-${new Date().toISOString().slice(0,10)}.xlsx`);
+    XLSX.writeFile(wb, `CCFACO-Reports-${localDateStr()}.xlsx`);
     showToast('Excel report downloaded.');
   }catch(e){
     showToast('Could not export: ' + e.message, true);
@@ -1508,7 +1512,7 @@ async function postSaleToLedger(saleId, total, itemsSummary){
     await fetch(`${state.supaUrl}/rest/v1/ledger_entries`, {
       method:'POST', headers: supaHeaders(),
       body: JSON.stringify([{
-        entry_date: new Date().toISOString().slice(0,10),
+        entry_date: localDateStr(),
         details: 'Sale: ' + itemsSummary,
         amount_in: total,
         amount_out: 0,
@@ -1623,7 +1627,11 @@ async function confirmVoid(){
 
 async function voidSale(saleId, reason){
   if(!isAdmin()) throw new Error('Admin lang ang puwedeng mag-void.');
-  const sale = state.sales.find(s => s.id === saleId);
+  let sale = state.sales.find(s => s.id === saleId);
+  if(!sale){
+    const r0 = await fetch(`${state.supaUrl}/rest/v1/sales?select=*&id=eq.${saleId}`, { headers: supaHeaders() });
+    if(r0.ok){ const a0 = await r0.json(); sale = a0[0]; }
+  }
   if(!sale) throw new Error('Hindi mahanap ang sale. I-refresh ang History.');
   if(sale.voided) throw new Error('Na-void na ang sale na ito.');
 
@@ -2911,7 +2919,9 @@ function renderLedger(){
         <span ${e.voided ? 'style="text-decoration:line-through;"' : ''}>${escapeHtml(e.details)}${Number(e.amount_in)>0 ? ' \u00B7 <span style="color:var(--pos);">+' + money(e.amount_in) + '</span>' : ''}${Number(e.amount_out)>0 ? ' \u00B7 <span style="color:var(--neg);">-' + money(e.amount_out) + '</span>' : ''}</span>
         ${(isAdmin() && !e.voided && state.ledgerDepositCol && Number(e.amount_out) > 0) ? `<button class="icon-btn" data-toggle-deposit="${e.id}" data-deposit-now="${e.is_deposit ? '1' : '0'}" title="${e.is_deposit ? 'Unmark as deposit' : 'Mark as cash deposit (exclude from Expense Report)'}">${e.is_deposit ? '\u2713' : '\u270E'}</button>` : ''}
       </div>
-      ${e.voided ? voidNoteHtml(e) : ((isAdmin() && state.voidCol && e.source !== 'sale') ? `<button class="ghost void-btn" data-void-ledger="${e.id}">Void entry</button>` : '')}
+      ${e.voided ? voidNoteHtml(e) : ((isAdmin() && state.voidCol) ? (e.source !== 'sale'
+        ? `<button class="ghost void-btn" data-void-ledger="${e.id}">Void entry</button>`
+        : (e.sale_id ? `<button class="ghost void-btn" data-void-ledger-sale="${e.sale_id}" data-void-label="${escapeHtml((e.entry_date || '') + ' \u00B7 ' + (e.details || ''))}">Void sale</button>` : '')) : '')}
     </div>`;
   }).join('') || (lq ? `<div class="empty">No ledger entries match your search.</div>` : `<div class="empty">No ledger entries yet.</div>`);
 
@@ -3865,6 +3875,9 @@ function render(){
       const cv = state.consignments.find(x=>x.id===b.dataset.voidConsign);
       if(cv) openVoidPrompt(b.dataset.voidMode === 'settle' ? 'consign-settle' : 'consign-sent', cv.id, (cv.consignee || 'consignee') + ' \u00B7 ' + new Date(cv.created_at).toLocaleDateString());
     });
+  });
+  app.querySelectorAll('[data-void-ledger-sale]').forEach(b=>{
+    b.addEventListener('click', ()=> openVoidPrompt('sale', b.dataset.voidLedgerSale, b.dataset.voidLabel || 'Sale'));
   });
   app.querySelectorAll('[data-void-ledger]').forEach(b=>{
     b.addEventListener('click', ()=>{
