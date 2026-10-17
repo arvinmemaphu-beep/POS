@@ -457,7 +457,26 @@ applyTheme(currentTheme(), false);
 <div class="app" id="app"></div>
 
 <script src="config.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script>
+let xlsxLoadPromise = null;
+function ensureXLSX(){
+  if(window.XLSX) return Promise.resolve(window.XLSX);
+  if(!xlsxLoadPromise){
+    xlsxLoadPromise = new Promise((resolve, reject)=>{
+      const script = document.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+      script.async = true;
+      script.onload = ()=> window.XLSX ? resolve(window.XLSX) : reject(new Error('Excel support did not initialize.'));
+      script.onerror = ()=> reject(new Error('Could not load Excel support.'));
+      document.head.appendChild(script);
+    }).catch(error=>{
+      xlsxLoadPromise = null;
+      throw error;
+    });
+  }
+  return xlsxLoadPromise;
+}
+</script>
 <script>
 const supabaseConfig = window.SUPABASE_CONFIG || {};
 const state = {
@@ -868,6 +887,7 @@ async function backupToExcel(){
   const btn = document.getElementById('btn-backup');
   if(btn){ btn.disabled = true; btn.textContent = 'Gumagawa ng backup...'; }
   try{
+    await ensureXLSX();
     const plan = [
       ['Products', 'products', 'select=*&order=id.asc'],
       ['Members', 'members', 'select=*&order=id.asc'],
@@ -929,6 +949,7 @@ async function exportHistoryToExcel(){
   const btn = document.getElementById('btn-export-excel');
   if(btn){ btn.disabled = true; btn.textContent = 'Exporting...'; }
   try{
+    await ensureXLSX();
     const [sales, consignments] = await Promise.all([
       fetchAllRows('sales', `select=*,sale_items(${saleItemCols()})&order=created_at.desc,id.asc`),
       fetchAllRows('consignments', 'select=*,consignment_items(*)&order=created_at.desc,id.asc')
@@ -2274,6 +2295,7 @@ async function importMembersFile(file){
   if(blockViewer() || !file) return;
   try{
     showToast('Binabasa ang file...');
+    await ensureXLSX();
     const buf = await file.arrayBuffer();
     const wb = XLSX.read(buf, { type: 'array' });
     let parsed = [];
@@ -2318,7 +2340,14 @@ async function importMembersFile(file){
     showToast('Import failed: ' + e.message, true);
   }
 }
-function downloadMemberTemplate(){
+async function downloadMemberTemplate(){
+  try{
+    showToast('Inihahanda ang Excel template...');
+    await ensureXLSX();
+  }catch(e){
+    showToast('Could not load Excel support. Check your connection and try again.', true);
+    return;
+  }
   const ws = XLSX.utils.json_to_sheet([
     { 'Full name': 'Juan Dela Cruz', 'Contact number': '09171234567' },
     { 'Full name': 'Maria Santos', 'Contact number': '' }
@@ -3536,10 +3565,17 @@ function renderExpenses(){
     ${body}
   </div>`;
 }
-function exportExpensesToExcel(){
+async function exportExpensesToExcel(){
   const c = computeExpenses(), r = reportRange();
   const sy = state.salesYear && state.salesYear.year === r.y ? state.salesYear.months : null;
   if(c.count === 0){ showToast('No expenses in this month to export.', true); return; }
+  try{
+    showToast('Preparing Excel export...');
+    await ensureXLSX();
+  }catch(e){
+    showToast('Could not load Excel support. Check your connection and try again.', true);
+    return;
+  }
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([
     { Item:'Month', Value: reportMonthLabel() },
@@ -3559,9 +3595,16 @@ function exportExpensesToExcel(){
   showToast('Expense report downloaded.');
 }
 
-function exportReportToExcel(){
+async function exportReportToExcel(){
   const c = computeReport();
   if(c.count === 0 && !c.freebies.length){ showToast('No sales in this month to export.', true); return; }
+  try{
+    showToast('Preparing Excel export...');
+    await ensureXLSX();
+  }catch(e){
+    showToast('Could not load Excel support. Check your connection and try again.', true);
+    return;
+  }
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([
     { Item:'Month', Value: reportMonthLabel() },
