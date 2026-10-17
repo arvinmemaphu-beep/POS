@@ -23,21 +23,31 @@ function fmtSupplyQty(n){ return String(Math.round((Number(n) || 0) * 1000) / 10
 
 async function checkSuppliesReady(){
   try{
-    const a = await fetch(`${state.supaUrl}/rest/v1/supplies?select=id&limit=1`, { headers: supaHeaders() });
-    const b = await fetch(`${state.supaUrl}/rest/v1/ledger_entries?select=supply_id&limit=1`, { headers: supaHeaders() });
+    const [a, b] = await Promise.all([
+      fetch(`${state.supaUrl}/rest/v1/supplies?select=id&limit=1`, { headers: supaHeaders() }),
+      fetch(`${state.supaUrl}/rest/v1/ledger_entries?select=supply_id&limit=1`, { headers: supaHeaders() })
+    ]);
     state.suppliesReady = a.ok && b.ok;
   }catch(e){
     state.suppliesReady = false;
   }
 }
 
+async function loadSuppliesData(){
+  if(!state.suppliesReady) await checkSuppliesReady();
+  if(state.suppliesReady) await fetchSupplies();
+}
+
 async function fetchSupplies(){
   if(!state.connected || !state.suppliesReady) return;
   try{
-    const r1 = await fetch(`${state.supaUrl}/rest/v1/supplies?select=*&order=name.asc&limit=1000`, { headers: supaHeaders() });
+    const [r1, r2] = await Promise.all([
+      fetch(`${state.supaUrl}/rest/v1/supplies?select=*&order=name.asc&limit=1000`, { headers: supaHeaders() }),
+      fetch(`${state.supaUrl}/rest/v1/supply_logs?select=*&order=created_at.desc&limit=400`, { headers: supaHeaders() })
+    ]);
     if(!r1.ok) throw new Error('Failed to load supplies');
-    state.supplies = await r1.json();
-    const r2 = await fetch(`${state.supaUrl}/rest/v1/supply_logs?select=*&order=created_at.desc&limit=400`, { headers: supaHeaders() });
+    const supplyRows = await r1.json();
+    state.supplies = supplyRows;
     if(r2.ok) state.supplyLogs = await r2.json();
   }catch(e){
     showToast('Could not load supplies: ' + e.message, true);
