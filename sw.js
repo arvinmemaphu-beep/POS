@@ -1,12 +1,30 @@
 // CCFACO Management System service worker
-// Only caches the app shell (HTML/JS/icons) so the app opens instantly and
+// Only caches the app shell (HTML/CSS/JS/icons) so the app opens instantly and
 // works offline. It NEVER caches Supabase requests — sales/products/members
 // data always comes fresh from the network so nothing goes stale or gets
 // double-sold while offline.
-const CACHE_NAME = 'ccfaco-pos-shell-v1';
+// Whenever you ADD a new .js/.css file to the app, list it in SHELL_FILES below
+// and bump the version number in CACHE_NAME.
+const CACHE_NAME = 'ccfaco-pos-shell-v3';
 const SHELL_FILES = [
   './index.html',
+  './styles.css',
+  './theme.js',
   './config.js',
+  './core.js',
+  './data.js',
+  './sell.js',
+  './products.js',
+  './ledger.js',
+  './void.js',
+  './consign.js',
+  './members.js',
+  './users.js',
+  './settings.js',
+  './views_main.js',
+  './reports.js',
+  './views_history.js',
+  './app.js',
   './manifest.json',
   './icon-192.png',
   './icon-512.png',
