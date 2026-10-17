@@ -202,9 +202,9 @@ function ledgerSupplyFieldsHtml(d){
   const opts = ['<option value="">\u2014 hindi supply \u2014</option>'].concat(state.supplies.map(s =>
     `<option value="${s.id}" ${d.supply_id === s.id ? 'selected' : ''}>${escapeHtml(s.name)} (${escapeHtml(s.unit || 'pcs')}) \u00B7 stock ${fmtSupplyQty(s.stock)}</option>`)).join('');
   return `
-      <div class="row2">
-        <div class="field"><label>Supply (para sa bibilhin: packaging, sticker, ingredient)</label><select id="lg-supply">${opts}</select></div>
-        <div class="field"><label>Ilan ang idadagdag sa stock</label><input id="lg-supply-qty" type="number" step="any" min="0" placeholder="0" value="${escapeHtml(d.supply_qty || '')}"></div>
+      <div class="row2 ledger-supply-row">
+        <div class="field"><label for="lg-supply">Supply</label><select id="lg-supply">${opts}</select></div>
+        <div class="field"><label for="lg-supply-qty">Quantity</label><input id="lg-supply-qty" type="number" step="any" min="0" placeholder="0" value="${escapeHtml(d.supply_qty || '')}"></div>
       </div>
       ${d.supply_id ? '<div class="setup-note" style="margin:-4px 0 10px;">Ilagay ang halaga sa <b>Out</b>. Madadagdag ang stock pag na-save, at makikita ang presyo bawat piraso sa history.</div>' : ''}`;
 }
