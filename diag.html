@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CCFACO diagnostic</title>
+<style>
+  body{ font:15px/1.5 system-ui,sans-serif; margin:0; padding:16px; background:#f4f4f4; color:#222; }
+  h1{ font-size:20px; margin:0 0 4px; }
+  .sub{ color:#555; margin-bottom:12px; }
+  .row{ background:#fff; border-radius:8px; padding:8px 12px; margin:6px 0; border-left:6px solid #999; word-break:break-word; }
+  .ok{ border-left-color:#1a8a3a; } .bad{ border-left-color:#c62828; background:#fff1f1; } .warn{ border-left-color:#e08a00; }
+  b{ font-weight:700; }
+  button{ font:inherit; padding:10px 14px; border-radius:8px; border:0; background:#1f6b4a; color:#fff; margin:6px 6px 0 0; }
+  pre{ white-space:pre-wrap; font-size:12px; background:#fff; padding:10px; border-radius:8px; }
+</style>
+</head>
+<body>
+<h1>CCFACO diagnostic</h1>
+<div class="sub">Hintayin matapos (mga 5 segundo), tapos i-screenshot ang buong page at ipadala kay Claude.</div>
+<div id="out"></div>
+<div>
+  <button id="btn-clear">Burahin ang service worker at cache, tapos buksan ang app</button>
+</div>
+<pre id="raw"></pre>
+<script>
+(async function(){
+  const out = document.getElementById('out');
+  const add = (cls, html) => { const d = document.createElement('div'); d.className = 'row ' + cls; d.innerHTML = html; out.appendChild(d); };
+  const base = location.href.replace(/diag\.html.*$/, '');
+  add('', 'Address: <b>' + base + '</b>');
+
+  // 1) what does the live index.html look like?
+  try{
+    const r = await fetch(base + 'index.html?x=' + Date.now(), { cache: 'no-store' });
+    const t = await r.text();
+    const srcs = (t.match(/<script[^>]+src="[^"]+"/g) || []).map(s => s.replace(/.*src="/, '').replace(/"$/, '').split('?')[0]);
+    const inlineScripts = (t.match(/<script(?![^>]*src)[^>]*>/g) || []).length;
+    const kind = t.length > 120000 ? 'ISANG FILE (lahat ng code ay nasa loob ng index.html)' : (srcs.some(s => /core\.js/.test(s)) ? 'HATI (v2: core.js, data.js, ... app.js)' : (srcs.some(s => /app\.js/.test(s)) ? 'HATI (lumang bersyon: styles.css, theme.js, app.js)' : 'HINDI MAKILALA'));
+    add(r.ok ? 'ok' : 'bad', 'index.html: HTTP ' + r.status + ' \u00B7 ' + t.length + ' bytes \u00B7 <b>' + kind + '</b><br>Mga script na tinatawag: ' + (srcs.join(', ') || 'wala') + ' \u00B7 inline scripts: ' + inlineScripts);
+  }catch(e){ add('bad', 'index.html: hindi ma-fetch (' + e.message + ')'); }
+
+  // 2) every file
+  const files = ['config.js','theme.js','styles.css','core.js','data.js','sell.js','products.js','ledger.js','void.js','consign.js','members.js','users.js','settings.js','views_main.js','reports.js','views_history.js','supplies.js','app.js','sw.js','manifest.json'];
+  for(const f of files){
+    try{
+      const r = await fetch(base + f + '?x=' + Date.now(), { cache: 'no-store' });
+      if(!r.ok){ add(f === 'supplies.js' || f === 'config.js' ? 'bad' : 'warn', f + ': <b>HTTP ' + r.status + '</b> (wala sa repo)'); continue; }
+      const t = await r.text();
+      let note = '';
+      let cls = 'ok';
+      if(/\.js$/.test(f)){
+        if(/^\s*<(!DOCTYPE|html)/i.test(t)){ cls = 'bad'; note = ' \u00B7 <b>HTML ang laman, hindi JavaScript!</b>'; }
+        else{
+          try{ new Function(t); note = ' \u00B7 syntax OK'; }
+          catch(e){ cls = 'bad'; note = ' \u00B7 <b>SYNTAX ERROR: ' + String(e.message).replace(/</g,'&lt;') + '</b>'; }
+        }
+      }
+      add(cls, f + ': HTTP ' + r.status + ' \u00B7 ' + t.length + ' bytes' + note);
+    }catch(e){ add('bad', f + ': error (' + e.message + ')'); }
+  }
+
+  // 3) service worker + caches
+  try{
+    const regs = navigator.serviceWorker ? await navigator.serviceWorker.getRegistrations() : [];
+    add(regs.length ? 'warn' : 'ok', 'Service workers na naka-register: <b>' + regs.length + '</b>');
+    const names = window.caches ? await caches.keys() : [];
+    add(names.length ? 'warn' : 'ok', 'Mga cache: <b>' + (names.join(', ') || 'wala') + '</b>');
+  }catch(e){ add('warn', 'Hindi ma-check ang service worker: ' + e.message); }
+
+  document.getElementById('raw').textContent = 'Browser: ' + navigator.userAgent;
+
+  document.getElementById('btn-clear').addEventListener('click', async ()=>{
+    try{
+      const regs = navigator.serviceWorker ? await navigator.serviceWorker.getRegistrations() : [];
+      for(const r of regs) await r.unregister();
+      if(window.caches){ for(const n of await caches.keys()) await caches.delete(n); }
+    }catch(e){}
+    location.href = base + 'index.html?fresh=' + Date.now();
+  });
+})();
+</script>
+</body>
+</html>
