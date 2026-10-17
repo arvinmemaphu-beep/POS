@@ -114,6 +114,8 @@ async function backupToExcel(){
       ['Consignment Items', 'consignment_items', 'select=*&order=id.asc'],
       ['Ledger', 'ledger_entries', 'select=*&order=id.asc'],
       ['Product Logs', 'product_logs', 'select=*&order=id.asc'],
+      ['Supplies', 'supplies', 'select=*&order=name.asc'],
+      ['Supply Logs', 'supply_logs', 'select=*&order=created_at.asc'],
       ['Users', 'profiles', 'select=*']
     ];
     const flat = rows => rows.map(r => {

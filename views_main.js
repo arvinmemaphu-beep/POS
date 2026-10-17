@@ -186,6 +186,7 @@ function renderLedger(){
         <div class="field"><label>PIC (person/branch)</label><input id="lg-pic" value="${escapeHtml(d.pic)}"></div>
         <div></div>
       </div>
+      ${typeof ledgerSupplyFieldsHtml === 'function' ? ledgerSupplyFieldsHtml(d) : ''}
       <div class="row2">
         <div class="field"><label>In (\u20B1)</label><input id="lg-in" type="number" step="0.01" placeholder="0" value="${d.in}"></div>
         <div class="field"><label>Out (\u20B1)</label><input id="lg-out" type="number" step="0.01" placeholder="0" value="${d.out}"></div>
@@ -201,7 +202,7 @@ function renderLedger(){
     return `
     <div class="sale-row" ${e.voided ? 'style="opacity:0.65;"' : ''}>
       <div class="head">
-        <span>${escapeHtml(dateLabel)}${e.qty ? ' \u00B7 ' + escapeHtml(e.qty) : ''}${e.pic ? ' \u00B7 ' + escapeHtml(e.pic) : ''}${e.source === 'sale' ? ' <span class="tag closed">Sale</span>' : ''}${e.is_deposit ? ' <span class="tag">Deposit</span>' : ''}${e.voided ? ' <span class="tag void">VOIDED</span>' : ''}</span>
+        <span>${escapeHtml(dateLabel)}${e.qty ? ' \u00B7 ' + escapeHtml(e.qty) : ''}${e.pic ? ' \u00B7 ' + escapeHtml(e.pic) : ''}${e.source === 'sale' ? ' <span class="tag closed">Sale</span>' : ''}${e.is_deposit ? ' <span class="tag">Deposit</span>' : ''}${typeof supplyTagHtml === 'function' ? supplyTagHtml(e) : ''}${e.voided ? ' <span class="tag void">VOIDED</span>' : ''}</span>
         <span class="amt mono">${money(e.balance)}</span>
       </div>
       <div class="items" style="display:flex; align-items:center; justify-content:space-between; gap:8px;">

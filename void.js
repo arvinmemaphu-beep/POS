@@ -128,6 +128,7 @@ async function confirmVoid(){
     else if(vp.kind === 'consign-settle') ok = await voidConsignSettlement(vp.id, reason);
     else if(vp.kind === 'consign-event') ok = await voidConsignEvent(vp.id, reason);
     else if(vp.kind === 'ledger') ok = await voidLedgerEntry(vp.id, reason);
+    else if(vp.kind === 'supply-use') ok = await voidSupplyUse(vp.id, reason);
   }catch(e){
     showToast('Void failed: ' + e.message, true);
   }
@@ -294,22 +295,31 @@ async function voidLedgerEntry(id, reason){
   if(!e) throw new Error('Hindi mahanap ang entry. I-refresh ang Ledger.');
   if(e.voided) throw new Error('Na-void na ang entry na ito.');
   if(e.source === 'sale') throw new Error('Ito ay galing sa Sale \u2014 i-void ang sale sa History o Consign.');
-  await patchRows(`ledger_entries?id=eq.${id}`, voidStamp(reason), true);
+  // a purchase linked to a Supply: take the quantity back out of that supply's stock first
+  const undone = (typeof supplyUndoLedgerBuy === 'function') ? await supplyUndoLedgerBuy(e, reason) : null;
+  try{
+    await patchRows(`ledger_entries?id=eq.${id}`, voidStamp(reason), true);
+  }catch(err){
+    if(undone) await supplyRestoreLedgerBuy(e);
+    throw err;
+  }
   state.expenseEntries = state.expenseEntries.filter(x => x.id !== id);
   await fetchLedger();
-  showToast('Ledger entry na-void.');
+  if(undone) await fetchSupplies();
+  showToast(undone ? 'Ledger entry na-void. Binawi ang stock ng supply.' : 'Ledger entry na-void.');
   return true;
 }
 
 function voidModalMarkup(){
   const vp = state.voidPrompt;
   if(!vp) return '';
-  const titles = { 'sale':'Void sale', 'consign-sent':'Void consignment', 'consign-settle':'Void settlement', 'consign-event':'Void bayad / nakita', 'ledger':'Void ledger entry' };
+  const titles = { 'sale':'Void sale', 'consign-sent':'Void consignment', 'consign-settle':'Void settlement', 'consign-event':'Void bayad / nakita', 'supply-use':'Void gamit ng supply', 'ledger':'Void ledger entry' };
   const notes = {
     'sale': 'Ibabalik sa stock ang mga item nito, at hindi na isasama sa Daily, Monthly report at Ledger. Mananatili ito sa History bilang VOIDED.',
     'consign-sent': 'Ibabalik sa stock ang lahat ng naipadala. Mamarkahang VOIDED ang consignment at hindi na ito puwedeng i-settle.',
     'consign-settle': 'Ibabalik ang consignment sa "Out" para ma-settle ulit nang tama. Ive-void ang sale at Ledger entry nito, at babawiin sa stock ang mga ibinalik.',
     'consign-event': 'Ive-void ang bayad (sale at Ledger entry) o ang pagbalik sa stock ng nakitang piraso, at babalik sa "Missing" ang mga ito.',
+    'supply-use': 'Ibabalik sa stock ng supply ang ginamit na dami. Mananatili sa history bilang VOIDED.',
     'ledger': 'Hindi na isasama sa Ledger balance at Expense report. Mananatili sa listahan bilang VOIDED.'
   };
   const chips = ['Maling encode', 'Dapat Member pala', 'Maling presyo/discount', 'Test lang'].map(t => `<button type="button" class="chip" data-void-chip="${t}">${t}</button>`).join('');

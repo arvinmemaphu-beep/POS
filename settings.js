@@ -307,6 +307,82 @@ create policy "admin can void consignment events" on consignment_events for upda
 
 notify pgrst, 'reload schema';</code>
       </div>
+
+      <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
+        <h2>Supplies (packaging, sticker, ingredients)</h2>
+        <div class="setup-note">I-run ito nang isang beses. Gagawa ito ng hiwalay na inventory para sa mga binibili (hindi binebenta). Madadagdag ang stock kapag may Out entry sa Ledger na may piniling supply, at mababawasan kapag pinindot ang <b>Gamitin</b> sa Supplies tab. May Void at Adjust para sa Admin.</div>
+        <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">create table if not exists supplies (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  category text not null default 'Other',
+  unit text not null default 'pcs',
+  stock numeric not null default 0 check (stock >= 0),
+  low_level numeric not null default 0,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists supply_logs (
+  id uuid primary key default gen_random_uuid(),
+  supply_id uuid not null references supplies(id) on delete cascade,
+  kind text not null,
+  delta numeric not null,
+  balance_after numeric,
+  unit_cost numeric,
+  ledger_id uuid references ledger_entries(id) on delete set null,
+  remarks text,
+  created_by text,
+  created_at timestamptz not null default now(),
+  voided boolean not null default false,
+  void_reason text,
+  voided_at timestamptz,
+  voided_by text
+);
+
+alter table ledger_entries add column if not exists supply_id uuid references supplies(id) on delete set null;
+alter table ledger_entries add column if not exists supply_qty numeric;
+
+alter table supplies enable row level security;
+alter table supply_logs enable row level security;
+
+drop policy if exists "authenticated can read supplies" on supplies;
+drop policy if exists "staff can write supplies" on supplies;
+create policy "authenticated can read supplies" on supplies for select to authenticated using (true);
+create policy "staff can write supplies" on supplies for all to authenticated
+  using (public.current_user_role() in ('admin','cashier'))
+  with check (public.current_user_role() in ('admin','cashier'));
+
+drop policy if exists "authenticated can read supply logs" on supply_logs;
+drop policy if exists "staff can add supply logs" on supply_logs;
+drop policy if exists "admin can void supply logs" on supply_logs;
+create policy "authenticated can read supply logs" on supply_logs for select to authenticated using (true);
+create policy "staff can add supply logs" on supply_logs for insert to authenticated
+  with check (public.current_user_role() in ('admin','cashier'));
+create policy "admin can void supply logs" on supply_logs for update to authenticated
+  using (public.current_user_role() = 'admin')
+  with check (public.current_user_role() = 'admin');
+
+-- atomic +/- of the stock; refuses to go below zero
+create or replace function public.supply_adjust(p_supply uuid, p_delta numeric)
+returns numeric
+language plpgsql
+security invoker
+set search_path = public
+as $$
+declare v numeric;
+begin
+  update supplies set stock = stock + p_delta
+  where id = p_supply and stock + p_delta >= 0
+  returning stock into v;
+  if v is null then
+    raise exception 'Hindi sapat ang stock';
+  end if;
+  return v;
+end;
+$$;
+grant execute on function public.supply_adjust(uuid, numeric) to authenticated;
+
+notify pgrst, 'reload schema';</code>
+      </div>
     </div>
   </div>`;
 }

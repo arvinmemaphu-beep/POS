@@ -58,7 +58,7 @@ const state = {
   ledgerReady: false,     // true once the ledger_entries table exists (see Settings SQL)
   ledgerDepositCol: false, // true once ledger_entries has an is_deposit column (see Settings SQL)
   ledgerEntries: [],
-  ledgerDraft: { date: '', qty: '', details: '', pic: '', in: '', out: '', deposit: false },
+  ledgerDraft: { date: '', qty: '', details: '', pic: '', in: '', out: '', deposit: false, supply_id: '', supply_qty: '' },
   themeOpen: false,       // true while the color theme popover is open
   reportMonth: '',        // 'YYYY-MM' picked in the Report tab
   reportSales: [],
@@ -183,7 +183,7 @@ async function restoreAuth(){
     await fetchCurrentUser();
     await loadProfile();
     const ok = await testConnection();
-    if(ok){ await checkDiscountColumn(); await checkFreeColumn(); await checkConsignMemberColumn(); await checkLedgerReady(); await checkLedgerDepositColumn(); await checkVoidColumn(); await checkMissingReady(); await fetchProducts(); await fetchMembers(); }
+    if(ok){ await checkDiscountColumn(); await checkFreeColumn(); await checkConsignMemberColumn(); await checkLedgerReady(); await checkLedgerDepositColumn(); await checkVoidColumn(); await checkMissingReady(); if(typeof checkSuppliesReady === 'function') await checkSuppliesReady(); await fetchProducts(); await fetchMembers(); }
     return ok;
   }catch(e){
     clearSession();
@@ -219,7 +219,7 @@ async function login(email, password){
     await checkConsignMemberColumn();
     await checkLedgerReady();
     await checkLedgerDepositColumn();
-    await checkVoidColumn(); await checkMissingReady();
+    await checkVoidColumn(); await checkMissingReady(); if(typeof checkSuppliesReady === 'function') await checkSuppliesReady();
     state.tab = 'pos';
     navStack.length = 0;
     await fetchProducts();
@@ -293,7 +293,8 @@ function switchTab(tab, fromBack){
   if(tab === 'history') fetchSales();
   if(tab === 'items') fetchSaleItems();
   if(tab === 'consign') fetchConsignments();
-  if(tab === 'ledger') fetchLedger();
+  if(tab === 'ledger'){ fetchLedger(); if(state.suppliesReady && !state.supplies.length) fetchSupplies(); }
+  if(tab === 'supplies' && typeof fetchSupplies === 'function') fetchSupplies();
   if(tab === 'report') fetchReport();
   if(tab === 'expenses') fetchExpenses();
   if(tab === 'members') fetchMembers();

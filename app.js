@@ -63,6 +63,8 @@ function render(){
     body = renderConsign();
   } else if(state.tab === 'ledger'){
     body = renderLedger();
+  } else if(state.tab === 'supplies'){
+    body = (typeof renderSupplies === 'function') ? renderSupplies() : renderPOS();
   } else if(state.tab === 'report'){
     body = renderReport();
   } else if(state.tab === 'expenses'){
@@ -91,6 +93,7 @@ function render(){
         '</div>' +
       '</div>' +
       '<button data-tab="ledger" class="' + active('ledger') + '">Ledger</button>' +
+      (typeof renderSupplies === 'function' ? '<button data-tab="supplies" class="' + active('supplies') + '">Supplies</button>' : '') +
       (isAdmin() ? '<button data-tab="settings" class="' + active('settings') + '">Settings</button>' : '') +
       mobileUser +
     '</nav>' : '';
@@ -691,6 +694,9 @@ function render(){
   if(lgDeposit) lgDeposit.addEventListener('change', ()=>{ state.ledgerDraft.deposit = lgDeposit.checked; });
   const addLedgerBtn = document.getElementById('btn-add-ledger');
   if(addLedgerBtn) addLedgerBtn.addEventListener('click', addLedgerEntry);
+
+  /* supplies (own file: supplies.js) */
+  if(typeof bindSupplies === 'function') bindSupplies(app);
 }
 
 async function init(){

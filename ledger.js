@@ -28,6 +28,14 @@ async function addLedgerEntry(){
   const d = state.ledgerDraft;
   const details = (d.details||'').trim();
   if(!details){ showToast('Enter the item/details.', true); return; }
+  // optional link to a Supply (packaging, sticker, ingredient): a purchase adds to that supply's stock
+  const supplyId = (state.suppliesReady && d.supply_id) ? d.supply_id : '';
+  const supplyQty = supplyId ? Number(d.supply_qty) : 0;
+  if(supplyId){
+    if(!(supplyQty > 0)){ showToast('Ilagay kung ilan ang idadagdag sa stock ng supply.', true); return; }
+    if(!(Number(d.out) > 0)){ showToast('Ilagay ang halaga ng binili sa Out.', true); return; }
+    if(Number(d.in) > 0){ showToast('Out lang ang puwede kapag may piniling supply.', true); return; }
+  }
   const row = {
     entry_date: d.date || null,
     qty: (d.qty||'').trim() || null,
@@ -38,15 +46,22 @@ async function addLedgerEntry(){
     source: 'manual'
   };
   if(state.ledgerDepositCol) row.is_deposit = !!d.deposit;
+  if(supplyId){ row.supply_id = supplyId; row.supply_qty = supplyQty; }
   try{
     const res = await fetch(`${state.supaUrl}/rest/v1/ledger_entries`, {
       method:'POST', headers: supaHeaders(),
       body: JSON.stringify([row])
     });
     if(!res.ok) throw new Error('Could not save entry');
-    state.ledgerDraft = { date: '', qty: '', details: '', pic: '', in: '', out: '', deposit: false };
+    let saved = null;
+    try{ saved = (await res.json())[0]; }catch(e){}
+    state.ledgerDraft = { date: '', qty: '', details: '', pic: '', in: '', out: '', deposit: false, supply_id: '', supply_qty: '' };
+    let stockOk = true;
+    if(supplyId) stockOk = await supplyAfterLedgerBuy(saved, supplyId, supplyQty, Number(d.out));
     await fetchLedger();
-    showToast('Ledger entry added.');
+    if(supplyId) await fetchSupplies();
+    if(!supplyId) showToast('Ledger entry added.');
+    else if(stockOk) showToast('Ledger entry added. Nadagdagan ang stock ng supply.');
   }catch(e){
     showToast('Could not add entry: ' + e.message, true);
   }
