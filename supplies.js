@@ -11,12 +11,12 @@ Object.assign(state, {
   supplyLogs: [],
   supplySearch: '',
   supplyDraft: { name: '', category: 'Packaging', unit: 'pcs', stock: '', low: '' },
-  supplyPanel: null,      // { id, mode: 'use' | 'adjust' | 'history', qty: '', remarks: '', busy: false }
+  supplyPanel: null,      // { id, mode: 'use' | 'adjust' | 'history' | 'edit', qty: '', remarks: '', busy: false }
   supplyBusy: false
 });
 
 const SUPPLY_CATEGORIES = ['Packaging', 'Sticker', 'Ingredient', 'Other'];
-const SUPPLY_KIND_LABEL = { opening: 'Panimulang stock', buy: 'Bili (Ledger)', use: 'Gamit', adjust: 'Adjust', 'void-buy': 'Void ng bili' };
+const SUPPLY_KIND_LABEL = { opening: 'Panimulang stock', buy: 'Bili (Ledger)', use: 'Gamit', adjust: 'Adjust', edit: 'Edit details', 'void-buy': 'Void ng bili' };
 
 function supplyById(id){ return state.supplies.find(s => s.id === id); }
 function fmtSupplyQty(n){ return String(Math.round((Number(n) || 0) * 1000) / 1000); }
@@ -113,6 +113,45 @@ async function submitSupplyPanel(){
   if(!p || p.busy || blockViewer()) return;
   const s = supplyById(p.id);
   if(!s) return;
+  if(p.mode === 'edit'){
+    const name = String(p.name || '').trim();
+    const category = String(p.category || 'Other');
+    const unit = String(p.unit || '').trim() || 'pcs';
+    const low = Number(p.low);
+    if(!name){ showToast('Isulat ang pangalan ng supply.', true); return; }
+    if(!Number.isFinite(low) || low < 0){ showToast('Hindi puwedeng negatibo ang low-stock level.', true); return; }
+    if(state.supplies.some(x => x.id !== s.id && String(x.name || '').trim().toLowerCase() === name.toLowerCase())){ showToast('Meron nang supply na ganyan ang pangalan.', true); return; }
+    const changes = [];
+    if(String(s.name || '') !== name) changes.push('Pangalan: ' + JSON.stringify(s.name || '') + ' → ' + JSON.stringify(name));
+    if(String(s.category || 'Other') !== category) changes.push('Category: ' + JSON.stringify(s.category || 'Other') + ' → ' + JSON.stringify(category));
+    if(String(s.unit || 'pcs') !== unit) changes.push('Unit: ' + JSON.stringify(s.unit || 'pcs') + ' → ' + JSON.stringify(unit));
+    if((Number(s.low_level) || 0) !== low) changes.push('Low-stock level: ' + fmtSupplyQty(s.low_level) + ' → ' + fmtSupplyQty(low));
+    if(!changes.length){ state.supplyPanel = null; render(); showToast('Walang binagong detalye.'); return; }
+    p.busy = true; render();
+    try{
+      const res = await fetch(state.supaUrl + '/rest/v1/supplies?id=eq.' + encodeURIComponent(s.id), {
+        method: 'PATCH', headers: supaHeaders(),
+        body: JSON.stringify({ name, category, unit, low_level: low })
+      });
+      if(!res.ok) throw new Error('Could not update the supply');
+      try{
+        await addSupplyLog({ supply_id: s.id, kind: 'edit', delta: 0, balance_after: Number(s.stock) || 0, remarks: changes.join('; ') });
+      }catch(logError){
+        state.supplyPanel = null;
+        await fetchSupplies();
+        showToast('Na-save ang detalye, pero hindi naisulat sa history. Subukan ulit pagkatapos tingnan ang koneksyon.', true);
+        return;
+      }
+      state.supplyPanel = null;
+      await fetchSupplies();
+      showToast('Na-update ang supply at naisulat sa history.');
+    }catch(e){
+      if(state.supplyPanel) state.supplyPanel.busy = false;
+      showToast('Could not update supply: ' + e.message, true);
+      render();
+    }
+    return;
+  }
   const qty = Number(p.qty);
   const remarks = (p.remarks || '').trim();
   if(p.mode === 'use'){
@@ -228,12 +267,12 @@ function supplyHistoryHtml(s){
   return rows.map(lg => {
     const d = Number(lg.delta) || 0;
     const when = lg.created_at ? new Date(lg.created_at).toLocaleString() : '';
+    const isDetailsEdit = lg.kind === 'edit';
     const canVoid = isAdmin() && state.voidCol && lg.kind === 'use' && !lg.voided;
     return `
       <div class="sub" style="margin-top:6px; ${lg.voided ? 'opacity:0.6;' : ''}">
         ${escapeHtml(when)} \u00B7 <b>${escapeHtml(SUPPLY_KIND_LABEL[lg.kind] || lg.kind)}</b>
-        <span class="mono" style="color:${d >= 0 ? 'var(--pos)' : 'var(--neg)'};">${d >= 0 ? '+' : ''}${fmtSupplyQty(d)}</span>
-        \u2192 ${fmtSupplyQty(lg.balance_after)} ${escapeHtml(s.unit || '')}
+        ${isDetailsEdit ? '' : `<span class="mono" style="color:${d >= 0 ? 'var(--pos)' : 'var(--neg)'};">${d >= 0 ? '+' : ''}${fmtSupplyQty(d)}</span> \u2192 ${fmtSupplyQty(lg.balance_after)} ${escapeHtml(s.unit || '')}`}
         ${lg.kind === 'buy' && lg.unit_cost != null ? ' \u00B7 ' + money(lg.unit_cost) + ' bawat ' + escapeHtml(s.unit || 'pc') : ''}
         ${lg.remarks ? ' \u00B7 ' + escapeHtml(lg.remarks) : ''}
         ${lg.created_by ? ' \u00B7 ' + escapeHtml(lg.created_by) : ''}
@@ -243,9 +282,22 @@ function supplyHistoryHtml(s){
   }).join('');
 }
 
+function supplyEditPanelHtml(s,p){
+  const categories = SUPPLY_CATEGORIES.includes(s.category) ? SUPPLY_CATEGORIES : [s.category].concat(SUPPLY_CATEGORIES);
+  const catOpts = categories.map(c => '<option value="' + escapeHtml(c) + '"' + (p.category === c ? ' selected' : '') + '>' + escapeHtml(c) + '</option>').join('');
+  return '<div style="margin-top:8px; padding:10px; border:1px solid var(--line, #3a4a44); border-radius:10px;">' +
+    '<div class="field"><label>Pangalan</label><input id="sp-edit-name" value="' + escapeHtml(p.name || '') + '" autocomplete="off"></div>' +
+    '<div class="row2"><div class="field"><label>Category</label><select id="sp-edit-category">' + catOpts + '</select></div>' +
+    '<div class="field"><label>Unit</label><input id="sp-edit-unit" value="' + escapeHtml(p.unit || '') + '" placeholder="pcs, kg, roll"></div></div>' +
+    '<div class="field"><label>Low-stock level</label><input id="sp-edit-low" type="number" step="any" min="0" value="' + escapeHtml(p.low || '') + '"></div>' +
+    '<div style="display:flex; gap:8px;"><button class="primary" data-supply-go="1" style="flex:1; margin-top:0;" ' + (p.busy ? 'disabled' : '') + '>' + (p.busy ? 'Saving...' : 'Save changes') + '</button>' +
+    '<button class="ghost" data-supply-cancel="1" style="flex:1;" ' + (p.busy ? 'disabled' : '') + '>Cancel</button></div></div>';
+}
+
 function supplyPanelHtml(s){
   const p = state.supplyPanel;
   if(!p || p.id !== s.id) return '';
+  if(p.mode === 'edit') return supplyEditPanelHtml(s,p);
   if(p.mode === 'history'){
     return `<div style="margin-top:8px;">${supplyHistoryHtml(s)}<button class="ghost" data-supply-cancel="1" style="margin-top:8px;">Isara</button></div>`;
   }
@@ -309,6 +361,7 @@ function renderSupplies(){
       </div>
       <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
         ${isViewer() ? '' : `<button class="primary" data-supply-use="${s.id}" style="margin-top:0; width:auto; padding:8px 14px;">Gamitin</button>`}
+        ${isViewer() ? '' : `<button class="ghost" data-supply-edit="${s.id}">Edit</button>`}
         <button class="ghost" data-supply-hist="${s.id}">History</button>
         ${isAdmin() ? `<button class="ghost" data-supply-adj="${s.id}">Adjust</button>` : ''}
       </div>
@@ -352,13 +405,23 @@ function bindSupplies(app){
     app.querySelectorAll('.supply-row').forEach(r => { r.style.display = (!q || (r.dataset.supplyText || '').includes(q)) ? '' : 'none'; });
   });
 
-  const openPanel = (id, mode) => { state.supplyPanel = { id, mode, qty: '', remarks: '', busy: false }; render(); };
+  const openPanel = (id, mode) => {
+    const s = supplyById(id);
+    state.supplyPanel = { id, mode, qty: '', remarks: '', busy: false, name: mode === 'edit' && s ? s.name : '', category: mode === 'edit' && s ? (s.category || 'Other') : 'Other', unit: mode === 'edit' && s ? (s.unit || 'pcs') : '', low: mode === 'edit' && s ? String(Number(s.low_level) || 0) : '' };
+    render();
+  };
   app.querySelectorAll('[data-supply-use]').forEach(b => b.addEventListener('click', ()=> openPanel(b.dataset.supplyUse, 'use')));
   app.querySelectorAll('[data-supply-adj]').forEach(b => b.addEventListener('click', ()=> openPanel(b.dataset.supplyAdj, 'adjust')));
+  app.querySelectorAll('[data-supply-edit]').forEach(b => b.addEventListener('click', ()=> openPanel(b.dataset.supplyEdit, 'edit')));
   app.querySelectorAll('[data-supply-hist]').forEach(b => b.addEventListener('click', ()=> openPanel(b.dataset.supplyHist, 'history')));
   app.querySelectorAll('[data-supply-cancel]').forEach(b => b.addEventListener('click', ()=>{ state.supplyPanel = null; render(); }));
   val('sp-qty', v => { if(state.supplyPanel) state.supplyPanel.qty = v; });
   val('sp-remarks', v => { if(state.supplyPanel) state.supplyPanel.remarks = v; });
+  val('sp-edit-name', v => { if(state.supplyPanel) state.supplyPanel.name = v; });
+  val('sp-edit-unit', v => { if(state.supplyPanel) state.supplyPanel.unit = v; });
+  val('sp-edit-low', v => { if(state.supplyPanel) state.supplyPanel.low = v; });
+  const editCategory = document.getElementById('sp-edit-category');
+  if(editCategory) editCategory.addEventListener('change', ()=>{ if(state.supplyPanel) state.supplyPanel.category = editCategory.value; });
   app.querySelectorAll('[data-supply-go]').forEach(b => b.addEventListener('click', submitSupplyPanel));
   app.querySelectorAll('[data-void-supply-log]').forEach(b => b.addEventListener('click', ()=>{
     const lg = state.supplyLogs.find(x => x.id === b.dataset.voidSupplyLog);
