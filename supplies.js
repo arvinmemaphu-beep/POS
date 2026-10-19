@@ -2,7 +2,7 @@
    Separate inventory for things we BUY (not sell).
    - Buying: add a Ledger "Out" entry and pick the supply + qty  -> stock goes up automatically.
    - Using:  Supplies tab -> "Gamitin"                          -> stock goes down.
-   - Admin can Adjust (physical count) and Void a "use" record.
+   - Admin: Edit (rename, category, unit, low level) + Adjust stock (add / remove) in one panel, same as Products. Admin can also Delete a supply or Void a "use" record.
    Needs the "Supplies" SQL in Settings (supplies, supply_logs, ledger columns, supply_adjust function). */
 
 Object.assign(state, {
@@ -11,12 +11,12 @@ Object.assign(state, {
   supplyLogs: [],
   supplySearch: '',
   supplyDraft: { name: '', category: 'Packaging', unit: 'pcs', stock: '', low: '' },
-  supplyPanel: null,      // { id, mode: 'use' | 'adjust' | 'history', qty: '', remarks: '', busy: false }
+  supplyPanel: null,      // { id, mode: 'use' | 'history' | 'edit', ... }  (edit = fields + addQty/remQty)
   supplyBusy: false
 });
 
 const SUPPLY_CATEGORIES = ['Packaging', 'Sticker', 'Ingredient', 'Other'];
-const SUPPLY_KIND_LABEL = { opening: 'Panimulang stock', buy: 'Bili (Ledger)', use: 'Gamit', adjust: 'Adjust', 'void-buy': 'Void ng bili' };
+const SUPPLY_KIND_LABEL = { opening: 'Panimulang stock', buy: 'Bili (Ledger)', use: 'Gamit', adjust: 'Adjust', 'void-buy': 'Void ng bili', edit: 'Edit' };
 
 function supplyById(id){ return state.supplies.find(s => s.id === id); }
 function fmtSupplyQty(n){ return String(Math.round((Number(n) || 0) * 1000) / 1000); }
@@ -115,29 +115,118 @@ async function submitSupplyPanel(){
   if(!s) return;
   const qty = Number(p.qty);
   const remarks = (p.remarks || '').trim();
-  if(p.mode === 'use'){
-    if(!(qty > 0)){ showToast('Ilagay kung ilan ang ginamit.', true); return; }
-    if(qty > Number(s.stock)){ showToast('Kulang ang stock: ' + fmtSupplyQty(s.stock) + ' ' + s.unit + ' lang ang natitira.', true); return; }
-  }else if(p.mode === 'adjust'){
-    if(!isAdmin()){ showToast('Admin lang ang puwedeng mag-adjust.', true); return; }
-    if(p.qty === '' || !(qty >= 0)){ showToast('Ilagay ang tamang bilang (physical count).', true); return; }
-    if(!remarks){ showToast('Isulat ang dahilan ng adjustment.', true); return; }
-    if(qty === Number(s.stock)){ showToast('Pareho lang sa kasalukuyang stock.', true); return; }
-  }else return;
+  if(p.mode !== 'use') return;
+  if(!(qty > 0)){ showToast('Ilagay kung ilan ang ginamit.', true); return; }
+  if(qty > Number(s.stock)){ showToast('Kulang ang stock: ' + fmtSupplyQty(s.stock) + ' ' + s.unit + ' lang ang natitira.', true); return; }
   p.busy = true; render();
   try{
-    const delta = p.mode === 'use' ? -qty : (qty - Number(s.stock));
+    const delta = -qty;
     const newStock = await supplyAdjustRpc(s.id, delta);
     await addSupplyLog({ supply_id: s.id, kind: p.mode, delta, balance_after: newStock, remarks: remarks || null });
     state.supplyPanel = null;
     await fetchSupplies();
-    showToast(p.mode === 'use'
-      ? 'Nabawasan ng ' + fmtSupplyQty(qty) + ' ' + s.unit + '. Natitira: ' + fmtSupplyQty(newStock) + '.'
-      : 'Na-adjust. Stock ngayon: ' + fmtSupplyQty(newStock) + '.');
+    showToast('Nabawasan ng ' + fmtSupplyQty(qty) + ' ' + s.unit + '. Natitira: ' + fmtSupplyQty(newStock) + '.');
   }catch(e){
     if(state.supplyPanel) state.supplyPanel.busy = false;
     showToast('Could not save: ' + e.message, true);
     render();
+  }
+}
+
+// Admin: add or remove stock from the Edit panel (like Products: "Add to stock" / "Deduct from stock"). Logged in supply history as "Adjust".
+async function changeSupplyStock(sign){
+  const p = state.supplyPanel;
+  if(!p || p.mode !== 'edit' || p.busy || blockViewer()) return;
+  if(!isAdmin()){ showToast('Admin lang ang puwedeng mag-adjust ng stock.', true); return; }
+  const s = supplyById(p.id);
+  if(!s) return;
+  const qty = Number(sign > 0 ? p.addQty : p.remQty);
+  if(!(qty > 0)){ showToast(sign > 0 ? 'Ilagay kung ilan ang idadagdag.' : 'Ilagay kung ilan ang ibabawas.', true); return; }
+  if(sign < 0 && qty > Number(s.stock)){
+    showToast('Hindi puwede: ' + fmtSupplyQty(s.stock) + ' ' + (s.unit || '') + ' lang ang stock.', true); return;
+  }
+  p.busy = true; render();
+  try{
+    const delta = sign > 0 ? qty : -qty;
+    const newStock = await supplyAdjustRpc(s.id, delta);
+    try{
+      await addSupplyLog({ supply_id: s.id, kind: 'adjust', delta, balance_after: newStock,
+        remarks: sign > 0 ? 'Dagdag sa stock (Edit)' : 'Bawas sa stock (inventory correction)' });
+    }catch(e){
+      showToast('Nabago ang stock, pero hindi naitala sa history.', true);
+    }
+    if(state.supplyPanel && state.supplyPanel.id === s.id){
+      state.supplyPanel.busy = false;
+      if(sign > 0) state.supplyPanel.addQty = ''; else state.supplyPanel.remQty = '';
+    }
+    await fetchSupplies();
+    showToast((sign > 0 ? '+' : '-') + fmtSupplyQty(qty) + ' ' + s.name + ' \u2014 ' + fmtSupplyQty(newStock) + ' ' + (s.unit || '') + ' na ngayon.');
+  }catch(e){
+    if(state.supplyPanel) state.supplyPanel.busy = false;
+    showToast('Could not adjust stock: ' + e.message, true);
+    render();
+  }
+}
+
+// Admin: rename / edit a supply (name, category, unit, low-stock level). Stock is changed by "Add/Deduct" in the same panel, Gamitin, or Ledger.
+async function saveSupplyEdit(){
+  const p = state.supplyPanel;
+  if(!p || p.mode !== 'edit' || p.busy) return;
+  if(!isAdmin()){ showToast('Admin lang ang puwedeng mag-edit ng supply.', true); return; }
+  const s = supplyById(p.id);
+  if(!s) return;
+  const name = (p.name || '').trim();
+  const unit = (p.unit || '').trim() || 'pcs';
+  const low = Number(p.low) || 0;
+  if(!name){ showToast('Isulat ang pangalan ng supply.', true); return; }
+  if(low < 0){ showToast('Hindi puwedeng negatibo.', true); return; }
+  if(state.supplies.some(x => x.id !== s.id && (x.name || '').trim().toLowerCase() === name.toLowerCase())){
+    showToast('Meron nang ibang supply na ganyan ang pangalan.', true); return;
+  }
+  p.busy = true; render();
+  try{
+    await patchRows(`supplies?id=eq.${s.id}`, { name, category: p.category || 'Other', unit, low_level: low }, true);
+    const changes = [];
+    if(name !== s.name) changes.push('pangalan: "' + s.name + '" \u2192 "' + name + '"');
+    if((p.category || 'Other') !== s.category) changes.push('category: ' + s.category + ' \u2192 ' + (p.category || 'Other'));
+    if(unit !== s.unit) changes.push('unit: ' + s.unit + ' \u2192 ' + unit);
+    if(low !== (Number(s.low_level) || 0)) changes.push('low-stock: ' + fmtSupplyQty(s.low_level) + ' \u2192 ' + fmtSupplyQty(low));
+    if(changes.length){
+      try{ await addSupplyLog({ supply_id: s.id, kind: 'edit', delta: 0, balance_after: Number(s.stock) || 0, remarks: changes.join('; ') }); }catch(e){}
+    }
+    state.supplyPanel = null;
+    await fetchSupplies();
+    showToast('Na-update ang supply.');
+  }catch(e){
+    if(state.supplyPanel) state.supplyPanel.busy = false;
+    showToast('Could not update supply: ' + e.message, true);
+    render();
+  }
+}
+
+// Admin: delete a supply. Its history (supply_logs) goes with it; Ledger entries stay but lose the supply link.
+async function deleteSupply(id){
+  if(blockViewer()) return;
+  if(!isAdmin()){ showToast('Admin lang ang puwedeng mag-delete ng supply.', true); return; }
+  const s = supplyById(id);
+  if(!s) return;
+  const logCount = state.supplyLogs.filter(x => x.supply_id === id).length;
+  const msg = 'Sigurado ka bang buburahin ang supply na "' + s.name + '"?'
+    + (logCount ? '\n\nMabubura rin ang ' + logCount + ' na history record niya (bili/gamit/adjust).' : '')
+    + (Number(s.stock) > 0 ? '\nMay stock pa na ' + fmtSupplyQty(s.stock) + ' ' + (s.unit || '') + '.' : '')
+    + '\n\nHindi na ito maibabalik.';
+  if(!confirm(msg)) return;
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/supplies?id=eq.${id}`, { method: 'DELETE', headers: supaHeaders() });
+    let rows = [];
+    try{ rows = await res.json(); }catch(e){}
+    if(!res.ok) throw new Error((rows && rows.message) || ('HTTP ' + res.status));
+    if(!Array.isArray(rows) || rows.length === 0) throw new Error('Walang nabura. Kulang ang permission \u2014 i-run ang "Supplies: Admin edit/delete" SQL sa Settings.');
+    if(state.supplyPanel && state.supplyPanel.id === id) state.supplyPanel = null;
+    await fetchSupplies();
+    showToast('Nabura ang supply.');
+  }catch(e){
+    showToast('Could not delete supply: ' + e.message, true);
   }
 }
 
@@ -174,7 +263,7 @@ async function supplyAfterLedgerBuy(entry, supplyId, qty, outAmount){
     });
     return true;
   }catch(e){
-    showToast('Naitala ang Ledger, pero hindi nadagdagan ang stock (' + e.message + '). Gamitin ang Adjust sa Supplies tab.', true);
+    showToast('Naitala ang Ledger, pero hindi nadagdagan ang stock (' + e.message + '). Gamitin ang Edit / Adjust sa Supplies tab.', true);
     return false;
   }
 }
@@ -187,7 +276,7 @@ async function supplyUndoLedgerBuy(e, reason){
   try{
     newStock = await supplyAdjustRpc(e.supply_id, -qty);
   }catch(err){
-    throw new Error('Hindi ma-void: nagamit na ang bahagi ng supply na ito (kulang ang stock para bawiin ang ' + fmtSupplyQty(qty) + '). I-Adjust muna sa Supplies tab.');
+    throw new Error('Hindi ma-void: nagamit na ang bahagi ng supply na ito (kulang ang stock para bawiin ang ' + fmtSupplyQty(qty) + '). I-adjust muna sa Supplies tab (Edit / Adjust).');
   }
   try{ await addSupplyLog({ supply_id: e.supply_id, kind: 'void-buy', delta: -qty, balance_after: newStock, ledger_id: e.id, remarks: reason }); }catch(err){}
   return qty;
@@ -229,6 +318,12 @@ function supplyHistoryHtml(s){
     const d = Number(lg.delta) || 0;
     const when = lg.created_at ? new Date(lg.created_at).toLocaleString() : '';
     const canVoid = isAdmin() && state.voidCol && lg.kind === 'use' && !lg.voided;
+    if(lg.kind === 'edit'){
+      return `
+      <div class="sub" style="margin-top:6px;">
+        ${escapeHtml(when)} \u00B7 <b>Edit</b>${lg.remarks ? ' \u00B7 ' + escapeHtml(lg.remarks) : ''}${lg.created_by ? ' \u00B7 ' + escapeHtml(lg.created_by) : ''}
+      </div>`;
+    }
     return `
       <div class="sub" style="margin-top:6px; ${lg.voided ? 'opacity:0.6;' : ''}">
         ${escapeHtml(when)} \u00B7 <b>${escapeHtml(SUPPLY_KIND_LABEL[lg.kind] || lg.kind)}</b>
@@ -248,6 +343,33 @@ function supplyPanelHtml(s){
   if(!p || p.id !== s.id) return '';
   if(p.mode === 'history'){
     return `<div style="margin-top:8px;">${supplyHistoryHtml(s)}<button class="ghost" data-supply-cancel="1" style="margin-top:8px;">Isara</button></div>`;
+  }
+  if(p.mode === 'edit'){
+    const eCat = SUPPLY_CATEGORIES.map(c => `<option ${p.category === c ? 'selected' : ''}>${c}</option>`).join('');
+    const dis = p.busy ? 'disabled' : '';
+    return `
+    <div style="margin-top:8px; padding:10px; border:1px solid var(--line, #3a4a44); border-radius:10px;">
+      <h2 style="margin-top:0;">Edit ${escapeHtml(s.name)}</h2>
+      <div class="field"><label>Pangalan</label><input id="sp-edit-name" value="${escapeHtml(p.name || '')}" autocomplete="off"></div>
+      <div class="row2">
+        <div class="field"><label>Category</label><select id="sp-edit-cat">${eCat}</select></div>
+        <div class="field"><label>Unit</label><input id="sp-edit-unit" value="${escapeHtml(p.unit || '')}"></div>
+      </div>
+      <div class="field"><label>Low-stock level</label><input id="sp-edit-low" type="number" step="any" min="0" placeholder="0" value="${escapeHtml(p.low || '')}"></div>
+      <button class="primary" data-supply-save="1" ${dis}>${p.busy ? 'Saving...' : 'Save changes'}</button>
+      <div style="border-top:1px solid var(--line, #3a4a44); margin:18px 0 14px;"></div>
+      <h2 style="margin-top:0;">Adjust stock</h2>
+      <div class="meta" style="font-size:12px; color:var(--ink-dim); margin-bottom:10px;">Current stock: <span class="mono">${fmtSupplyQty(s.stock)} ${escapeHtml(s.unit || '')}</span>. Bumababa ito sa <b>Gamitin</b> at tumataas sa Ledger bili. Lahat ng adjust ay nasa History.</div>
+      <div class="row2">
+        <div class="field"><label>Add (${escapeHtml(s.unit || 'pcs')})</label><input id="sp-add-qty" type="number" step="any" min="0" placeholder="0" value="${escapeHtml(p.addQty || '')}"></div>
+        <div class="field"><label>&nbsp;</label><button class="ghost" data-supply-add="1" style="width:100%; padding:9px;" ${dis}>Add to stock</button></div>
+      </div>
+      <div class="row2">
+        <div class="field"><label>Remove (inventory correction)</label><input id="sp-rem-qty" type="number" step="any" min="0" placeholder="0" value="${escapeHtml(p.remQty || '')}"></div>
+        <div class="field"><label>&nbsp;</label><button class="ghost" data-supply-rem="1" style="width:100%; padding:9px;" ${dis}>Deduct from stock</button></div>
+      </div>
+      <button class="ghost" data-supply-cancel="1" style="width:100%;" ${dis}>Done</button>
+    </div>`;
   }
   const isUse = p.mode === 'use';
   return `
@@ -310,7 +432,8 @@ function renderSupplies(){
       <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
         ${isViewer() ? '' : `<button class="primary" data-supply-use="${s.id}" style="margin-top:0; width:auto; padding:8px 14px;">Gamitin</button>`}
         <button class="ghost" data-supply-hist="${s.id}">History</button>
-        ${isAdmin() ? `<button class="ghost" data-supply-adj="${s.id}">Adjust</button>` : ''}
+        ${isAdmin() ? `<button class="ghost" data-supply-edit="${s.id}">Edit / Adjust</button>` : ''}
+        ${isAdmin() ? `<button class="ghost void-btn" data-supply-del="${s.id}">Delete</button>` : ''}
       </div>
       ${open ? supplyPanelHtml(s) : ''}
     </div>`;
@@ -354,8 +477,24 @@ function bindSupplies(app){
 
   const openPanel = (id, mode) => { state.supplyPanel = { id, mode, qty: '', remarks: '', busy: false }; render(); };
   app.querySelectorAll('[data-supply-use]').forEach(b => b.addEventListener('click', ()=> openPanel(b.dataset.supplyUse, 'use')));
-  app.querySelectorAll('[data-supply-adj]').forEach(b => b.addEventListener('click', ()=> openPanel(b.dataset.supplyAdj, 'adjust')));
   app.querySelectorAll('[data-supply-hist]').forEach(b => b.addEventListener('click', ()=> openPanel(b.dataset.supplyHist, 'history')));
+  app.querySelectorAll('[data-supply-edit]').forEach(b => b.addEventListener('click', ()=>{
+    const s = supplyById(b.dataset.supplyEdit);
+    if(!s) return;
+    state.supplyPanel = { id: s.id, mode: 'edit', name: s.name || '', category: s.category || 'Other', unit: s.unit || '', low: Number(s.low_level) > 0 ? String(s.low_level) : '', addQty: '', remQty: '', busy: false };
+    render();
+  }));
+  app.querySelectorAll('[data-supply-save]').forEach(b => b.addEventListener('click', saveSupplyEdit));
+  app.querySelectorAll('[data-supply-add]').forEach(b => b.addEventListener('click', ()=> changeSupplyStock(1)));
+  app.querySelectorAll('[data-supply-rem]').forEach(b => b.addEventListener('click', ()=> changeSupplyStock(-1)));
+  val('sp-add-qty', v => { if(state.supplyPanel) state.supplyPanel.addQty = v; });
+  val('sp-rem-qty', v => { if(state.supplyPanel) state.supplyPanel.remQty = v; });
+  app.querySelectorAll('[data-supply-del]').forEach(b => b.addEventListener('click', ()=> deleteSupply(b.dataset.supplyDel)));
+  val('sp-edit-name', v => { if(state.supplyPanel) state.supplyPanel.name = v; });
+  val('sp-edit-unit', v => { if(state.supplyPanel) state.supplyPanel.unit = v; });
+  val('sp-edit-low', v => { if(state.supplyPanel) state.supplyPanel.low = v; });
+  const eCat = document.getElementById('sp-edit-cat');
+  if(eCat) eCat.addEventListener('change', ()=>{ if(state.supplyPanel) state.supplyPanel.category = eCat.value; });
   app.querySelectorAll('[data-supply-cancel]').forEach(b => b.addEventListener('click', ()=>{ state.supplyPanel = null; render(); }));
   val('sp-qty', v => { if(state.supplyPanel) state.supplyPanel.qty = v; });
   val('sp-remarks', v => { if(state.supplyPanel) state.supplyPanel.remarks = v; });

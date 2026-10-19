@@ -3079,6 +3079,49 @@ notify pgrst, 'reload schema';</code>
       </div>
 
       <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
+        <h2>Supplies: Admin edit/delete</h2>
+        <div class="setup-note">I-run ito nang isang beses, <b>pagkatapos</b> ng "Supplies" SQL sa itaas. Admin lang ang makakapag-edit (rename) at makakapag-delete ng supply. Cashier ay makakapagdagdag pa rin ng supply, at makakapag-Gamitin at makakapag-Ledger buy (dumadaan sa function na may role check).</div>
+        <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">-- stock changes go through this function so cashiers can still Gamitin / buy
+create or replace function public.supply_adjust(p_supply uuid, p_delta numeric)
+returns numeric
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare v numeric;
+begin
+  if coalesce(public.current_user_role(), '') not in ('admin','cashier') then
+    raise exception 'Not allowed';
+  end if;
+  update supplies set stock = stock + p_delta
+  where id = p_supply and stock + p_delta >= 0
+  returning stock into v;
+  if v is null then
+    raise exception 'Hindi sapat ang stock';
+  end if;
+  return v;
+end;
+$$;
+revoke all on function public.supply_adjust(uuid, numeric) from public;
+grant execute on function public.supply_adjust(uuid, numeric) to authenticated;
+
+-- direct table writes: staff can add; only admin can edit or delete
+drop policy if exists "staff can write supplies" on supplies;
+drop policy if exists "staff can add supplies" on supplies;
+drop policy if exists "admin can edit supplies" on supplies;
+drop policy if exists "admin can delete supplies" on supplies;
+create policy "staff can add supplies" on supplies for insert to authenticated
+  with check (public.current_user_role() in ('admin','cashier'));
+create policy "admin can edit supplies" on supplies for update to authenticated
+  using (public.current_user_role() = 'admin')
+  with check (public.current_user_role() = 'admin');
+create policy "admin can delete supplies" on supplies for delete to authenticated
+  using (public.current_user_role() = 'admin');
+
+notify pgrst, 'reload schema';</code>
+      </div>
+
+      <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
         <h2>Consign: Missing items</h2>
         <div class="setup-note">I-run ito nang isang beses. Kapag may kulang sa consignment, mananatili itong <b>Missing</b> (hindi Closed). Puwede pa itong i-transact: <b>Bayad</b> (bagong sale + Ledger entry) o <b>Nakita</b> (balik sa stock). Closed lang kapag wala nang kulang. May Void din ang bawat record (Admin).</div>
         <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">create table if not exists consignment_events (
