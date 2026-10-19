@@ -2,7 +2,7 @@
    Separate inventory for things we BUY (not sell).
    - Buying: add a Ledger "Out" entry and pick the supply + qty  -> stock goes up automatically.
    - Using:  Supplies tab -> "Gamitin"                          -> stock goes down.
-   - Admin: Edit (rename, category, unit, low level) + Adjust stock (add / remove) in one panel, same as Products. Admin can also Delete a supply or Void a "use" record.
+   - Admin + cashier: Edit (rename, category, unit, low level) + Adjust stock (add / remove) in one panel, same as Products. Only Admin can Delete a supply or Void a "use" record.
    Needs the "Supplies" SQL in Settings (supplies, supply_logs, ledger columns, supply_adjust function). */
 
 Object.assign(state, {
@@ -19,6 +19,8 @@ const SUPPLY_CATEGORIES = ['Packaging', 'Sticker', 'Ingredient', 'Other'];
 const SUPPLY_KIND_LABEL = { opening: 'Panimulang stock', buy: 'Bili (Ledger)', use: 'Gamit', adjust: 'Adjust', 'void-buy': 'Void ng bili', edit: 'Edit' };
 
 function supplyById(id){ return state.supplies.find(s => s.id === id); }
+// Admin and cashier can Edit / Adjust stock; only Admin can Delete. Viewers can do neither.
+function canEditSupply(){ return isAdmin() || state.role === 'cashier'; }
 function fmtSupplyQty(n){ return String(Math.round((Number(n) || 0) * 1000) / 1000); }
 
 async function checkSuppliesReady(){
@@ -133,11 +135,11 @@ async function submitSupplyPanel(){
   }
 }
 
-// Admin: add or remove stock from the Edit panel (like Products: "Add to stock" / "Deduct from stock"). Logged in supply history as "Adjust".
+// Admin/cashier: add or remove stock from the Edit panel (like Products: "Add to stock" / "Deduct from stock"). Logged in supply history as "Adjust".
 async function changeSupplyStock(sign){
   const p = state.supplyPanel;
   if(!p || p.mode !== 'edit' || p.busy || blockViewer()) return;
-  if(!isAdmin()){ showToast('Admin lang ang puwedeng mag-adjust ng stock.', true); return; }
+  if(!canEditSupply()){ showToast('Walang permission mag-adjust ng stock.', true); return; }
   const s = supplyById(p.id);
   if(!s) return;
   const qty = Number(sign > 0 ? p.addQty : p.remQty);
@@ -168,11 +170,11 @@ async function changeSupplyStock(sign){
   }
 }
 
-// Admin: rename / edit a supply (name, category, unit, low-stock level). Stock is changed by "Add/Deduct" in the same panel, Gamitin, or Ledger.
+// Admin/cashier: rename / edit a supply (name, category, unit, low-stock level). Stock is changed by "Add/Deduct" in the same panel, Gamitin, or Ledger.
 async function saveSupplyEdit(){
   const p = state.supplyPanel;
   if(!p || p.mode !== 'edit' || p.busy) return;
-  if(!isAdmin()){ showToast('Admin lang ang puwedeng mag-edit ng supply.', true); return; }
+  if(!canEditSupply()){ showToast('Walang permission mag-edit ng supply.', true); return; }
   const s = supplyById(p.id);
   if(!s) return;
   const name = (p.name || '').trim();
@@ -432,7 +434,7 @@ function renderSupplies(){
       <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
         ${isViewer() ? '' : `<button class="primary" data-supply-use="${s.id}" style="margin-top:0; width:auto; padding:8px 14px;">Gamitin</button>`}
         <button class="ghost" data-supply-hist="${s.id}">History</button>
-        ${isAdmin() ? `<button class="ghost" data-supply-edit="${s.id}">Edit / Adjust</button>` : ''}
+        ${canEditSupply() ? `<button class="ghost" data-supply-edit="${s.id}">Edit / Adjust</button>` : ''}
         ${isAdmin() ? `<button class="ghost void-btn" data-supply-del="${s.id}">Delete</button>` : ''}
       </div>
       ${open ? supplyPanelHtml(s) : ''}

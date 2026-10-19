@@ -3080,7 +3080,7 @@ notify pgrst, 'reload schema';</code>
 
       <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
         <h2>Supplies: Admin edit/delete</h2>
-        <div class="setup-note">I-run ito nang isang beses, <b>pagkatapos</b> ng "Supplies" SQL sa itaas. Admin lang ang makakapag-edit (rename) at makakapag-delete ng supply. Cashier ay makakapagdagdag pa rin ng supply, at makakapag-Gamitin at makakapag-Ledger buy (dumadaan sa function na may role check).</div>
+        <div class="setup-note">I-run ito nang isang beses, <b>pagkatapos</b> ng "Supplies" SQL sa itaas. Admin at cashier ang makakapag-edit (rename) at makakapag-adjust ng stock. <b>Admin lang</b> ang makakapag-delete ng supply.</div>
         <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">-- stock changes go through this function so cashiers can still Gamitin / buy
 create or replace function public.supply_adjust(p_supply uuid, p_delta numeric)
 returns numeric
@@ -3105,16 +3105,17 @@ $$;
 revoke all on function public.supply_adjust(uuid, numeric) from public;
 grant execute on function public.supply_adjust(uuid, numeric) to authenticated;
 
--- direct table writes: staff can add; only admin can edit or delete
+-- direct table writes: admin + cashier can add and edit; only admin can delete
 drop policy if exists "staff can write supplies" on supplies;
 drop policy if exists "staff can add supplies" on supplies;
 drop policy if exists "admin can edit supplies" on supplies;
+drop policy if exists "staff can edit supplies" on supplies;
 drop policy if exists "admin can delete supplies" on supplies;
 create policy "staff can add supplies" on supplies for insert to authenticated
   with check (public.current_user_role() in ('admin','cashier'));
-create policy "admin can edit supplies" on supplies for update to authenticated
-  using (public.current_user_role() = 'admin')
-  with check (public.current_user_role() = 'admin');
+create policy "staff can edit supplies" on supplies for update to authenticated
+  using (coalesce(public.current_user_role(), '') in ('admin','cashier'))
+  with check (coalesce(public.current_user_role(), '') in ('admin','cashier'));
 create policy "admin can delete supplies" on supplies for delete to authenticated
   using (public.current_user_role() = 'admin');
 
