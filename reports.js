@@ -45,7 +45,7 @@ async function loadExpenseEntries(){
     all.push(...rows);
     if(rows.length < step) break;
   }
-  return all.filter(e => !e.is_deposit && !e.voided); // voided entries are not expenses
+  return all.filter(e => !e.is_deposit && !e.is_transfer && !e.voided); // voided entries are not expenses
 }
 function shiftReportMonth(delta){
   const r = reportRange();

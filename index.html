@@ -537,8 +537,9 @@ const state = {
   editingConsignItem: null, // {id, product_name} consignment_items row being name-corrected, Admin-only
   ledgerReady: false,     // true once the ledger_entries table exists (see Settings SQL)
   ledgerDepositCol: false, // true once ledger_entries has an is_deposit column (see Settings SQL)
+  ledgerTransferCol: false, // true once ledger_entries has an is_transfer column (see Settings SQL)
   ledgerEntries: [],
-  ledgerDraft: { date: '', qty: '', details: '', pic: '', in: '', out: '', deposit: false, supply_id: '', supply_qty: '' },
+  ledgerDraft: { date: '', qty: '', details: '', pic: '', in: '', out: '', deposit: false, transfer: false, supply_id: '', supply_qty: '' },
   suppliesModuleError: '',
   themeOpen: false,       // true while the color theme popover is open
   reportMonth: '',        // 'YYYY-MM' picked in the Report tab
@@ -664,7 +665,7 @@ async function restoreAuth(){
     await fetchCurrentUser();
     await loadProfile();
     const ok = await testConnection();
-    if(ok){ await checkDiscountColumn(); await checkFreeColumn(); await checkConsignMemberColumn(); await checkLedgerReady(); await checkLedgerDepositColumn(); await checkVoidColumn(); await checkMissingReady(); await fetchProducts(); await fetchMembers(); }
+    if(ok){ await checkDiscountColumn(); await checkFreeColumn(); await checkConsignMemberColumn(); await checkLedgerReady(); await checkLedgerDepositColumn(); await checkLedgerTransferColumn(); await checkVoidColumn(); await checkMissingReady(); await fetchProducts(); await fetchMembers(); }
     return ok;
   }catch(e){
     clearSession();
@@ -700,6 +701,7 @@ async function login(email, password){
     await checkConsignMemberColumn();
     await checkLedgerReady();
     await checkLedgerDepositColumn();
+    await checkLedgerTransferColumn();
     await checkVoidColumn(); await checkMissingReady();
     state.tab = 'pos';
     navStack.length = 0;
@@ -1156,6 +1158,16 @@ async function checkLedgerReady(){
   }
 }
 
+// Detect once whether the ledger_entries table has an is_transfer column (see Settings SQL)
+async function checkLedgerTransferColumn(){
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/ledger_entries?select=is_transfer&limit=1`, { headers: supaHeaders() });
+    state.ledgerTransferCol = res.ok;
+  }catch(e){
+    state.ledgerTransferCol = false;
+  }
+}
+
 // Detect once whether the ledger_entries table has an is_deposit column (see Settings SQL)
 async function checkLedgerDepositColumn(){
   try{
@@ -1539,6 +1551,11 @@ async function addLedgerEntry(){
     if(!(Number(d.out) > 0)){ showToast('Ang bili ng supply ay dapat may halaga sa Out.', true); return; }
     if(Number(d.in) > 0){ showToast('Gumamit ng Out para sa pagbili ng supply.', true); return; }
   }
+  if(state.ledgerTransferCol && d.transfer){
+    if(!(Number(d.in) > 0) || Number(d.out) > 0){ showToast('Ang Cash Transfer ay pasok na pera: ilagay ang halaga sa In (hindi sa Out).', true); return; }
+    if(supplyId){ showToast('Hindi puwedeng may supply ang Cash Transfer. Ang pagbili ng raw mat ay hiwalay na Out entry.', true); return; }
+  }
+  if(state.ledgerDepositCol && d.deposit && d.transfer){ showToast('Piliin lang ang Cash Deposit O Cash Transfer, hindi pareho.', true); return; }
   const row = {
     entry_date: d.date || null,
     qty: (d.qty||'').trim() || null,
@@ -1549,6 +1566,7 @@ async function addLedgerEntry(){
     source: 'manual'
   };
   if(state.ledgerDepositCol) row.is_deposit = !!d.deposit;
+  if(state.ledgerTransferCol) row.is_transfer = !!d.transfer;
   if(supplyId){ row.supply_id = supplyId; row.supply_qty = supplyQty; }
   try{
     const res = await fetch(`${state.supaUrl}/rest/v1/ledger_entries`, {
@@ -1558,7 +1576,7 @@ async function addLedgerEntry(){
     if(!res.ok) throw new Error('Could not save entry');
     let saved = null;
     try{ const body = await res.json(); saved = Array.isArray(body) ? body[0] : body; }catch(e){}
-    state.ledgerDraft = { date: '', qty: '', details: '', pic: '', in: '', out: '', deposit: false, supply_id: '', supply_qty: '' };
+    state.ledgerDraft = { date: '', qty: '', details: '', pic: '', in: '', out: '', deposit: false, transfer: false, supply_id: '', supply_qty: '' };
     if(supplyId && !saved){
       await fetchLedger();
       showToast('Ledger entry added, pero hindi makuha ang saved row para i-update ang supply. I-check at i-adjust ang stock.', true);
@@ -1587,6 +1605,22 @@ async function toggleLedgerDeposit(id, makeDeposit){
     if(!res.ok) throw new Error('Could not update entry');
     await fetchLedger();
     showToast(makeDeposit ? 'Marked as cash deposit.' : 'Unmarked as deposit.');
+  }catch(e){
+    showToast('Could not update entry: ' + e.message, true);
+  }
+}
+
+// Admin-only: retroactively mark/unmark a past In entry as a cash transfer (bank -> cash on hand)
+async function toggleLedgerTransfer(id, makeTransfer){
+  if(!isAdmin()) return;
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/ledger_entries?id=eq.${id}`, {
+      method:'PATCH', headers: supaHeaders(),
+      body: JSON.stringify({ is_transfer: makeTransfer })
+    });
+    if(!res.ok) throw new Error('Could not update entry');
+    await fetchLedger();
+    showToast(makeTransfer ? 'Marked as cash transfer.' : 'Unmarked as transfer.');
   }catch(e){
     showToast('Could not update entry: ' + e.message, true);
   }
@@ -2937,6 +2971,12 @@ create policy "staff can write ledger" on ledger_entries for all to authenticate
       </div>
 
       <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
+        <h2>Ledger: cash transfers</h2>
+        <div class="setup-note">I-run ito nang isang beses para may "CASH TRANSFER" checkbox sa Add entry form ng Ledger. Gamitin ito sa In entry kapag ang pera ay galing sa bangko at idinagdag sa cash pambili ng raw mat. Papasok ito sa Ledger balance pero may "Transfer" tag at HINDI ito Sale, kaya hindi ito mabibilang sa sales. Para sa mga LUMANG In entry: Admin lang ang makakakita ng &#9998; button sa tabi ng In entry &mdash; i-tap para markahan (o i-unmark) na transfer.</div>
+        <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">alter table ledger_entries add column if not exists is_transfer boolean not null default false;</code>
+      </div>
+
+      <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
         <h2>Freebies (libre)</h2>
         <div class="setup-note">I-run ito nang isang beses para magamit ang \uD83C\uDF81 Free button sa Sell tab. Kapag nagbigay ng libre (free token, gift, free taste), ire-record ito na \u20B10.00 kasama ang remarks, at lalabas sa Daily, History, at Monthly report. Hindi ito isasama sa sales total.</div>
         <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">alter table sale_items add column if not exists is_free boolean not null default false;
@@ -3354,6 +3394,7 @@ function renderLedger(){
         <div class="field"><label>Out (\u20B1)</label><input id="lg-out" type="number" step="0.01" placeholder="0" value="${d.out}"></div>
       </div>
       ${state.ledgerDepositCol ? `<label style="display:flex; align-items:center; gap:10px; margin:8px 0 14px; padding:10px 12px; border-radius:10px; background:#FFD8A8; color:#7A3E00; font-weight:700; font-size:14px; cursor:pointer;"><input id="lg-deposit" type="checkbox" ${d.deposit ? 'checked' : ''} style="width:22px; height:22px; accent-color:#7A3E00; flex-shrink:0;"> CASH DEPOSIT &mdash; i click ito kung for deposit sa bangko</label>` : ''}
+      ${state.ledgerTransferCol ? `<label style="display:flex; align-items:center; gap:10px; margin:8px 0 14px; padding:10px 12px; border-radius:10px; background:#C9E8FF; color:#0B4A7A; font-weight:700; font-size:14px; cursor:pointer;"><input id="lg-transfer" type="checkbox" ${d.transfer ? 'checked' : ''} style="width:22px; height:22px; accent-color:#0B4A7A; flex-shrink:0;"> CASH TRANSFER &mdash; i click ito kung galing sa bangko, pandagdag na cash pambili ng raw mat (hindi sales)</label>` : ''}
       <button class="primary" id="btn-add-ledger">Add to ledger</button>
     </div>`;
 
@@ -3364,11 +3405,12 @@ function renderLedger(){
     return `
     <div class="sale-row" ${e.voided ? 'style="opacity:0.65;"' : ''}>
       <div class="head">
-        <span>${escapeHtml(dateLabel)}${e.qty ? ' \u00B7 ' + escapeHtml(e.qty) : ''}${e.pic ? ' \u00B7 ' + escapeHtml(e.pic) : ''}${e.source === 'sale' ? ' <span class="tag closed">Sale</span>' : ''}${e.is_deposit ? ' <span class="tag">Deposit</span>' : ''}${e.voided ? ' <span class="tag void">VOIDED</span>' : ''}</span>
+        <span>${escapeHtml(dateLabel)}${e.qty ? ' \u00B7 ' + escapeHtml(e.qty) : ''}${e.pic ? ' \u00B7 ' + escapeHtml(e.pic) : ''}${e.source === 'sale' ? ' <span class="tag closed">Sale</span>' : ''}${e.is_deposit ? ' <span class="tag">Deposit</span>' : ''}${e.is_transfer ? ' <span class="tag">Transfer</span>' : ''}${e.voided ? ' <span class="tag void">VOIDED</span>' : ''}</span>
         <span class="amt mono">${money(e.balance)}</span>
       </div>
       <div class="items" style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
         <span ${e.voided ? 'style="text-decoration:line-through;"' : ''}>${escapeHtml(e.details)}${Number(e.amount_in)>0 ? ' \u00B7 <span style="color:var(--pos);">+' + money(e.amount_in) + '</span>' : ''}${Number(e.amount_out)>0 ? ' \u00B7 <span style="color:var(--neg);">-' + money(e.amount_out) + '</span>' : ''}</span>
+        ${(isAdmin() && !e.voided && state.ledgerTransferCol && e.source !== 'sale' && Number(e.amount_in) > 0 && !(Number(e.amount_out) > 0)) ? `<button class="icon-btn" data-toggle-transfer="${e.id}" data-transfer-now="${e.is_transfer ? '1' : '0'}" title="${e.is_transfer ? 'Unmark as cash transfer' : 'Mark as cash transfer (galing bangko, hindi sales)'}">${e.is_transfer ? '\u2713' : '\u270E'}</button>` : ''}
         ${(isAdmin() && !e.voided && state.ledgerDepositCol && Number(e.amount_out) > 0) ? `<button class="icon-btn" data-toggle-deposit="${e.id}" data-deposit-now="${e.is_deposit ? '1' : '0'}" title="${e.is_deposit ? 'Unmark as deposit' : 'Mark as cash deposit (exclude from Expense Report)'}">${e.is_deposit ? '\u2713' : '\u270E'}</button>` : ''}
       </div>
       ${e.voided ? voidNoteHtml(e) : ((isAdmin() && state.voidCol) ? (e.source !== 'sale'
@@ -4495,6 +4537,12 @@ function render(){
   const cancelSaleItemBtn = document.getElementById('btn-cancel-sale-item');
   if(cancelSaleItemBtn) cancelSaleItemBtn.addEventListener('click', ()=>{ state.editingSaleItem = null; render(); });
 
+  /* ledger: mark/unmark a past In entry as a cash transfer (Admin-only) */
+  app.querySelectorAll('[data-toggle-transfer]').forEach(b=>{
+    b.addEventListener('click', ()=>{
+      toggleLedgerTransfer(b.dataset.toggleTransfer, b.dataset.transferNow !== '1');
+    });
+  });
   /* ledger: mark/unmark a past entry as a cash deposit (Admin-only) */
   app.querySelectorAll('[data-toggle-deposit]').forEach(b=>{
     b.addEventListener('click', ()=>{
@@ -4787,7 +4835,9 @@ function render(){
   const lgOut = document.getElementById('lg-out');
   if(lgOut) lgOut.addEventListener('input', ()=>{ state.ledgerDraft.out = lgOut.value; });
   const lgDeposit = document.getElementById('lg-deposit');
-  if(lgDeposit) lgDeposit.addEventListener('change', ()=>{ state.ledgerDraft.deposit = lgDeposit.checked; });
+  if(lgDeposit) lgDeposit.addEventListener('change', ()=>{ state.ledgerDraft.deposit = lgDeposit.checked; if(lgDeposit.checked) state.ledgerDraft.transfer = false; render(); });
+  const lgTransfer = document.getElementById('lg-transfer');
+  if(lgTransfer) lgTransfer.addEventListener('change', ()=>{ state.ledgerDraft.transfer = lgTransfer.checked; if(lgTransfer.checked) state.ledgerDraft.deposit = false; render(); });
   const addLedgerBtn = document.getElementById('btn-add-ledger');
   if(addLedgerBtn) addLedgerBtn.addEventListener('click', addLedgerEntry);
   if(typeof bindSupplies === 'function') bindSupplies(app);
