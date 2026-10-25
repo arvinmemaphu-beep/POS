@@ -521,7 +521,7 @@ const state = {
   deductQty: '',
   consignSearch: '',
   productLogsLoading: false,
-  userDraft: { name:'', role:'cashier', email:'', password:'' }, // Add-user form values, kept so a failed attempt does not wipe what was typed
+  userDraft: { name:'', role:'cashier', email:'', password:'', memberId:'' }, // Add-user form values, kept so a failed attempt does not wipe what was typed
   usersError: '',       // why the Current users list could not load (shown in Settings)
   usersLoading: false,
   pwPrompt: null,       // {cur, next, confirm, busy} while the Change password popup is open
@@ -764,6 +764,34 @@ function blockViewer(){
   return false;
 }
 
+let profileModulePromise = null;
+function ensureProfileModule(){
+  if(typeof renderMemberProfileView === 'function' && typeof bindMemberProfile === 'function') return Promise.resolve();
+  if(!profileModulePromise){
+    profileModulePromise = new Promise((resolve, reject)=>{
+      const script = document.createElement('script');
+      script.src = 'profile.js';
+      script.async = true;
+      script.onload = ()=>{
+        if(typeof renderMemberProfileView === 'function' && typeof bindMemberProfile === 'function') resolve();
+        else reject(new Error('Member profile module did not initialize.'));
+      };
+      script.onerror = ()=>reject(new Error('Could not download profile.js.'));
+      document.head.appendChild(script);
+    }).catch(e=>{ profileModulePromise = null; throw e; });
+  }
+  return profileModulePromise;
+}
+async function loadProfileForMembersTab(){
+  try{
+    await ensureProfileModule();
+    if(state.tab === 'members') render();
+    if(typeof loadMemberProfileData === 'function') await loadMemberProfileData();
+  }catch(e){
+    showToast('Could not load Member profile: ' + (e.message || e), true);
+  }
+}
+
 let suppliesModulePromise = null;
 let suppliesDataPromise = null;
 function ensureSuppliesModule(){
@@ -823,7 +851,7 @@ function switchTab(tab, fromBack){
   if(tab === 'supplies') loadSuppliesForCurrentTab();
   if(tab === 'report') fetchReport();
   if(tab === 'expenses') fetchExpenses();
-  if(tab === 'members') fetchMembers();
+  if(tab === 'members'){ fetchMembers(); loadProfileForMembersTab(); }
   if(tab === 'settings') fetchAppUsers();
 }
 
@@ -2521,6 +2549,10 @@ function updateMemberList(){
 
 function renderMembers(){
   const em = state.editingMember;
+  if(typeof renderMemberProfileView === 'function'){
+    const mine = renderMemberProfileView();   // a Regular account linked to a member sees its own profile
+    if(mine) return mine;
+  }
   const leftPanel = isViewer() ?
     '<h2>Members</h2><div class="setup-note">Regular access is view-only. Members cannot be added or changed here.</div>' :
     (em ?
@@ -2528,6 +2560,7 @@ function renderMembers(){
       '<div class="field"><label>Full name</label><input id="em-name" value="' + escapeHtml(em.full_name) + '"></div>' +
       '<div class="field"><label>Contact number</label><input id="em-phone" value="' + escapeHtml(em.phone || '') + '"></div>' +
       '<button class="primary" id="btn-save-member">Save changes</button>' +
+      (typeof memberProfilePanelHtml === 'function' ? memberProfilePanelHtml(em) : '') +
       '<div style="border-top:1px solid var(--line); margin:18px 0 14px;"></div>' +
       '<button class="ghost" id="btn-cancel-member" style="width:100%;">Done</button>' :
       '<h2>Add a member</h2>' +
@@ -2587,7 +2620,7 @@ function friendlyAuthError(payload, fallback){
   return raw || fallback;
 }
 
-async function createUser(email, password, fullName, role){
+async function createUser(email, password, fullName, role, memberId){
   if(!isAdmin()) return false;
   if(!email || !password){ showToast('Enter an email and password.', true); return false; }
   if(password.length < 6){ showToast('Password should be at least 6 characters.', true); return false; }
@@ -2616,9 +2649,28 @@ async function createUser(email, password, fullName, role){
         throw new Error('Nagawa ang account pero hindi ma-save ang role: i-run ang "Manage users" SQL sa ibaba (Settings), tapos itakda ang role ng user.');
       throw new Error('Nagawa ang account pero hindi ma-save ang role (' + (m || errBody.hint || profRes.status) + ').');
     }
-    state.userDraft = { name:'', role:'cashier', email:'', password:'' };
+    // Link the new login to the chosen member (so the member sees their own profile). Guest = no member.
+    let linkNote = '';
+    if(memberId){
+      try{
+        const linkRes = await fetch(`${state.supaUrl}/rest/v1/members?id=eq.${encodeURIComponent(memberId)}`, {
+          method:'PATCH', headers: supaHeaders(),
+          body: JSON.stringify({ user_id: newUserId })
+        });
+        if(!linkRes.ok){
+          const le = await linkRes.json().catch(()=>({}));
+          throw new Error(le.message || ('error ' + linkRes.status));
+        }
+        const lm = state.members.find(x => x.id === memberId);
+        if(lm) lm.user_id = newUserId;
+        linkNote = ' Naka-link sa member na ' + (lm ? lm.full_name : '') + '.';
+      }catch(le){
+        linkNote = ' Pero hindi na-link sa member (' + le.message + '). I-run ang "Member profile" SQL sa Settings, tapos i-link sa Members tab.';
+      }
+    }
+    state.userDraft = { name:'', role:'cashier', email:'', password:'', memberId:'' };
     const needsConfirm = !payload.access_token && !(payload.session && payload.session.access_token);
-    showToast('User added as ' + roleDisplay(role) + '.' + (needsConfirm ? ' Kailangan niyang i-confirm ang email bago makapag-login.' : ''));
+    showToast('User added as ' + roleDisplay(role) + '.' + linkNote + (needsConfirm ? ' Kailangan niyang i-confirm ang email bago makapag-login.' : ''));
     await fetchAppUsers();
     return true;
   }catch(e){
@@ -2793,7 +2845,15 @@ where u.id = p.user_id and (p.email is null or p.email = '');</code>
 
     <div class="setup-note" style="margin-top:10px;">Puwedeng palitan ng bawat user ang sarili niyang password gamit ang <strong>\uD83D\uDD11 Password</strong> button sa itaas (katabi ng Sign out). Kung nakalimutan ng user ang password, i-reset ito sa Supabase: Authentication \u2192 Users \u2192 tatlong tuldok sa user \u2192 <em>Send password recovery</em>, o gumawa ng bagong user.</div>
 
-    <div class="row2" style="margin-top:14px;">
+    <div class="field" style="margin-top:14px;">
+      <label>Member (para sa profile niya)</label>
+      <select id="nu-member" class="field-input">
+        <option value=""${state.userDraft.memberId ? '' : ' selected'}>Wala (guest) &mdash; i-type ang pangalan</option>
+        ${state.members.filter(m => !m.user_id || m.id === state.userDraft.memberId).map(m => `<option value="${m.id}"${state.userDraft.memberId === m.id ? ' selected' : ''}>${escapeHtml(m.full_name)}</option>`).join('')}
+      </select>
+      <div class="setup-note" style="margin-top:6px;">Kapag member ang pinili, awtomatikong makikita niya ang sarili niyang profile pag nag-login. Kapag guest, mag-type lang ng pangalan sa baba at view-only lang siya.</div>
+    </div>
+    <div class="row2">
       <div class="field"><label>Full name</label><input id="nu-name" placeholder="e.g. Maria Santos" value="${escapeHtml(state.userDraft.name)}"></div>
       <div class="field"><label>Role</label>
         <select id="nu-role" class="field-input">
@@ -2907,6 +2967,38 @@ alter table members enable row level security;
 
 create policy "authenticated can read members" on members for select to authenticated using (true);
 create policy "staff can write members" on members for all to authenticated using (public.current_user_role() in ('admin','cashier')) with check (public.current_user_role() in ('admin','cashier'));</code>
+      </div>
+
+      <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
+        <h2>Member profile (contributions)</h2>
+        <div class="setup-note">I-run nang isang beses sa Supabase SQL Editor. Kailangan muna ang <strong>User access roles</strong> at <strong>Members</strong> SQL sa itaas. Magdadagdag ito ng link ng login account sa member, at ng talaan ng contributions (Share Capital, Statutory Fund, atbp.). Ang Admin lang ang makakapagdagdag/magbubura; ang Regular na account ay makikita lang ang sarili niyang contributions.</div>
+        <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">alter table public.members add column if not exists user_id uuid references auth.users(id) on delete set null;
+create unique index if not exists members_user_id_key on public.members(user_id) where user_id is not null;
+
+create table if not exists public.member_contributions (
+  id bigint generated always as identity primary key,
+  member_id uuid not null references public.members(id) on delete cascade,
+  entry_date date not null default current_date,
+  fund text not null,
+  amount numeric not null,
+  note text,
+  created_by uuid default auth.uid(),
+  created_at timestamptz default now()
+);
+create index if not exists member_contributions_member_idx on public.member_contributions(member_id, entry_date desc);
+alter table public.member_contributions enable row level security;
+
+drop policy if exists "admin can manage contributions" on public.member_contributions;
+create policy "admin can manage contributions" on public.member_contributions for all to authenticated
+  using (public.current_user_role() = 'admin') with check (public.current_user_role() = 'admin');
+
+drop policy if exists "cashier can read contributions" on public.member_contributions;
+create policy "cashier can read contributions" on public.member_contributions for select to authenticated
+  using (public.current_user_role() = 'cashier');
+
+drop policy if exists "member can read own contributions" on public.member_contributions;
+create policy "member can read own contributions" on public.member_contributions for select to authenticated
+  using (exists (select 1 from public.members m where m.id = member_contributions.member_id and m.user_id = auth.uid()));</code>
       </div>
 
       <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
@@ -4646,6 +4738,13 @@ function render(){
     const f = document.getElementById(id);
     if(f) f.addEventListener(key === 'role' ? 'change' : 'input', ()=>{ state.userDraft[key] = f.value; });
   });
+  const nuMember = document.getElementById('nu-member');
+  if(nuMember) nuMember.addEventListener('change', ()=>{
+    const m = state.members.find(x => x.id === nuMember.value);
+    state.userDraft.memberId = nuMember.value;
+    if(m){ state.userDraft.name = m.full_name; state.userDraft.role = 'viewer'; }
+    render();
+  });
   const reloadUsersBtn = document.getElementById('btn-reload-users');
   if(reloadUsersBtn) reloadUsersBtn.addEventListener('click', fetchAppUsers);
   const addUserBtn = document.getElementById('btn-add-user');
@@ -4655,7 +4754,7 @@ function render(){
       const password = document.getElementById('nu-password').value;
       const name = document.getElementById('nu-name').value.trim();
       const role = document.getElementById('nu-role').value;
-      await createUser(email, password, name, role);
+      await createUser(email, password, name, role, state.userDraft.memberId || '');
     });
   }
   app.querySelectorAll('[data-role-user]').forEach(sel=>{
@@ -4841,6 +4940,7 @@ function render(){
   const addLedgerBtn = document.getElementById('btn-add-ledger');
   if(addLedgerBtn) addLedgerBtn.addEventListener('click', addLedgerEntry);
   if(typeof bindSupplies === 'function') bindSupplies(app);
+  if(typeof bindMemberProfile === 'function') bindMemberProfile(app);
 }
 
 async function init(){
