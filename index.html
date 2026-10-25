@@ -2508,14 +2508,16 @@ function memberRowHtml(m){
   return '<div class="product-row" data-medit="' + m.id + '">' +
     '<div><div class="name">' + escapeHtml(m.full_name) + '</div><div class="meta">' + (m.phone ? escapeHtml(m.phone) : 'No contact number') + '</div></div>' +
     '<div style="display:flex; align-items:center; gap:10px;">' +
+    (typeof mpMemberTotalLine === 'function' ? mpMemberTotalLine(m.id) : '') +
     (isViewer() ? '' : '<button class="icon-btn" data-mdel="' + m.id + '" title="Delete">✕</button>') + '</div></div>';
 }
 
 function memberCountHtml(){
   const total = state.members.length;
   const q = state.memberSearch.trim();
-  if(q) return 'Showing <strong style="color:var(--ink);">' + filteredMembers().length + '</strong> of ' + total + ' members';
-  return 'Total members: <strong style="color:var(--gold); font-size:18px;">' + total + '</strong>';
+  const extra = (typeof mpOverallTotalsHtml === 'function') ? mpOverallTotalsHtml() : '';
+  if(q) return 'Showing <strong style="color:var(--ink);">' + filteredMembers().length + '</strong> of ' + total + ' members' + extra;
+  return 'Total members: <strong style="color:var(--gold); font-size:18px;">' + total + '</strong>' + extra;
 }
 
 function memberRowsHtml(){

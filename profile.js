@@ -15,10 +15,14 @@ Object.assign(state, {
   mpBusy: false,
   mpSharesReady: null,  // does member_contributions have the "shares" column? null = unknown
   mpImport: null,       // Excel share-import screen (Admin)
+  mpEditId: null,       // contribution being edited (Admin)
+  mpEditDraft: null,
+  mpTotals: { loaded: false, loading: false, byMember: {}, shares: 0, amount: 0, withShares: 0 },
   mpDraft: { date: '', fund: 'Share Capital', kind: 'in', amount: '', shares: '', note: '' }
 });
 
 const MP_DEFAULT_FUNDS = ['Share Capital', 'Statutory Fund', 'Savings'];
+const MP_SHARE_PAR = 100;   // pesos per share (Excel: 60 shares = 6,000)
 
 function mpFmt(n){
   const v = Number(n) || 0;
@@ -107,9 +111,24 @@ function mpBalancesHtml(rows){
     '</div>';
 }
 
+function mpEditFormHtml(r){
+  const d = state.mpEditDraft || {};
+  return '<div style="padding:12px; border:1px solid var(--gold-dim); border-radius:10px; margin:8px 0;">' +
+    '<div style="font-size:16px; font-weight:600; margin-bottom:8px;">I-edit ang entry</div>' +
+    '<div class="field"><label>Date</label><input id="mpe-date" type="date" value="' + escapeHtml(d.date || '') + '"></div>' +
+    '<div class="field"><label>Fund</label><input id="mpe-fund" list="mp-fund-list" value="' + escapeHtml(d.fund || '') + '"></div>' +
+    (state.mpSharesReady === false ? '' : '<div class="field"><label>No. of shares</label><input id="mpe-shares" type="number" inputmode="decimal" step="1" value="' + escapeHtml(d.shares || '') + '"></div>') +
+    '<div class="field"><label>Amount (\u20B1) &mdash; negatibo kung bawas</label><input id="mpe-amount" type="number" inputmode="decimal" step="0.01" value="' + escapeHtml(d.amount || '') + '"></div>' +
+    '<div class="field"><label>Note</label><input id="mpe-note" value="' + escapeHtml(d.note || '') + '"></div>' +
+    '<div style="display:flex; gap:8px;"><button class="primary" id="mpe-save" style="flex:1;"' + (state.mpBusy ? ' disabled' : '') + '>' + (state.mpBusy ? 'Saving...' : 'Save') + '</button>' +
+    '<button class="ghost" id="mpe-cancel" style="flex:1;">Cancel</button></div>' +
+  '</div>';
+}
+
 function mpHistoryHtml(rows, canDelete){
   if(!rows.length) return '<div class="empty">Wala pang naka-record na contribution.</div>';
   return rows.map(r => {
+    if(canDelete && state.mpEditId !== null && String(state.mpEditId) === String(r.id)) return mpEditFormHtml(r);
     const amt = Number(r.amount) || 0;
     return '<div style="display:flex; justify-content:space-between; gap:10px; align-items:flex-start; padding:11px 4px; border-bottom:1px solid var(--line);">' +
       '<div style="min-width:0;">' +
@@ -118,7 +137,7 @@ function mpHistoryHtml(rows, canDelete){
       '</div>' +
       '<div style="display:flex; align-items:center; gap:8px; flex-shrink:0;">' +
         '<span style="font-size:17px; font-weight:700; color:' + (amt < 0 ? 'var(--neg)' : 'var(--pos)') + ';">' + (amt > 0 ? '+' : '') + mpFmt(amt) + '</span>' +
-        (canDelete ? '<button class="icon-btn" data-mp-del="' + r.id + '" title="Delete">\u2715</button>' : '') +
+        (canDelete ? '<button class="icon-btn" data-mp-edit="' + r.id + '" title="Edit">\u270E</button><button class="icon-btn" data-mp-del="' + r.id + '" title="Delete">\u2715</button>' : '') +
       '</div>' +
     '</div>';
   }).join('');
@@ -239,7 +258,14 @@ function bindMemberProfile(app){
   const amount = document.getElementById('mp-amount');
   if(amount) amount.addEventListener('input', () => { d.amount = amount.value; });
   const shares = document.getElementById('mp-shares');
-  if(shares) shares.addEventListener('input', () => { d.shares = shares.value; });
+  if(shares) shares.addEventListener('input', () => {
+    d.shares = shares.value;
+    const n = Number(shares.value);
+    if(/share\s*capital/i.test(d.fund || '') && isFinite(n) && n > 0){
+      d.amount = String(Math.round(n * MP_SHARE_PAR * 100) / 100);
+      const am = document.getElementById('mp-amount'); if(am) am.value = d.amount;
+    }
+  });
   const note = document.getElementById('mp-note');
   if(note) note.addEventListener('input', () => { d.note = note.value; });
 
@@ -247,6 +273,32 @@ function bindMemberProfile(app){
   if(addBtn) addBtn.addEventListener('click', mpAdd);
   if(typeof mpBindImport === 'function') mpBindImport(app);
 
+  app.querySelectorAll('[data-mp-edit]').forEach(b => {
+    b.addEventListener('click', ev => {
+      ev.stopPropagation();
+      const row = state.mpRows.find(r => String(r.id) === String(b.getAttribute('data-mp-edit')));
+      if(!row) return;
+      state.mpEditId = row.id;
+      state.mpEditDraft = { date: String(row.entry_date || '').slice(0, 10), fund: row.fund || '', amount: String(row.amount == null ? '' : row.amount), shares: row.shares == null ? '' : String(row.shares), note: row.note || '' };
+      render();
+    });
+  });
+  const ed = state.mpEditDraft;
+  if(ed){
+    const bindEd = (id, key) => { const el = document.getElementById(id); if(el) el.addEventListener('input', () => { ed[key] = el.value; }); };
+    bindEd('mpe-date', 'date'); bindEd('mpe-fund', 'fund'); bindEd('mpe-amount', 'amount'); bindEd('mpe-note', 'note');
+    const esh = document.getElementById('mpe-shares');
+    if(esh) esh.addEventListener('input', () => {
+      ed.shares = esh.value;
+      const n = Number(esh.value);
+      if(/share\s*capital/i.test(ed.fund || '') && isFinite(n) && n !== 0){
+        ed.amount = String(Math.round(n * MP_SHARE_PAR * 100) / 100);
+        const am = document.getElementById('mpe-amount'); if(am) am.value = ed.amount;
+      }
+    });
+    const sv = document.getElementById('mpe-save'); if(sv) sv.addEventListener('click', mpSaveEdit);
+    const cn = document.getElementById('mpe-cancel'); if(cn) cn.addEventListener('click', () => { state.mpEditId = null; state.mpEditDraft = null; render(); });
+  }
   app.querySelectorAll('[data-mp-del]').forEach(b => {
     b.addEventListener('click', ev => { ev.stopPropagation(); mpDelete(b.getAttribute('data-mp-del')); });
   });
@@ -289,10 +341,105 @@ async function mpAdd(){
     d.amount = ''; d.shares = ''; d.note = '';
     state.mpBusy = false;
     showToast(d.kind === 'out' ? 'Withdrawal recorded.' : 'Contribution added.');
+    mpLoadTotals();
   }catch(e){
     state.mpBusy = false;
     showToast('Could not save: ' + e.message, true);
   }
+}
+
+async function mpSaveEdit(){
+  if(!isAdmin() || state.mpEditId === null || state.mpBusy) return;
+  const d = state.mpEditDraft;
+  const fund = String(d.fund || '').trim();
+  const amt = Number(d.amount);
+  if(!fund){ showToast('Ilagay ang fund.', true); return; }
+  if(d.amount === '' || !isFinite(amt)){ showToast('Maglagay ng tamang amount.', true); return; }
+  if(!d.date){ showToast('Piliin ang petsa.', true); return; }
+  const body = { entry_date: d.date, fund: fund, amount: Math.round(amt * 100) / 100, note: String(d.note || '').trim() || null };
+  if(state.mpSharesReady !== false){
+    const sh = d.shares === '' ? null : Number(d.shares);
+    if(sh !== null && !isFinite(sh)){ showToast('Hindi tamang bilang ng shares.', true); return; }
+    body.shares = sh;
+  }
+  state.mpBusy = true; render();
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/member_contributions?id=eq.${encodeURIComponent(state.mpEditId)}`, { method: 'PATCH', headers: supaHeaders(), body: JSON.stringify(body) });
+    if(!res.ok){ const e = await res.json().catch(() => ({})); throw new Error(e.message || ('Update failed (' + res.status + ')')); }
+    const out = await res.json();
+    const i = state.mpRows.findIndex(r => String(r.id) === String(state.mpEditId));
+    if(i !== -1 && out && out[0]) state.mpRows[i] = out[0];
+    state.mpRows.sort((a, b) => String(b.entry_date).localeCompare(String(a.entry_date)) || (b.id - a.id));
+    state.mpEditId = null; state.mpEditDraft = null; state.mpBusy = false;
+    showToast('Entry updated.');
+    mpLoadTotals();
+  }catch(e){
+    state.mpBusy = false;
+    showToast('Could not update: ' + e.message, true);
+  }
+}
+
+/* ----- totals for Admin / Cashier: shares + Share Capital per member, and overall ----- */
+async function mpLoadTotals(){
+  if(isViewer() || !state.connected || state.mpTotals.loading) return;
+  state.mpTotals.loading = true;
+  try{
+    const all = [];
+    let withShares = true;
+    for(let off = 0; ; off += 1000){
+      let res = await fetch(`${state.supaUrl}/rest/v1/member_contributions?select=member_id,fund,amount,shares&order=id.asc&limit=1000&offset=${off}`, { headers: supaHeaders() });
+      if(!res.ok && off === 0){
+        withShares = false;
+        res = await fetch(`${state.supaUrl}/rest/v1/member_contributions?select=member_id,fund,amount&order=id.asc&limit=1000&offset=${off}`, { headers: supaHeaders() });
+      }
+      if(!res.ok) throw new Error('totals ' + res.status);
+      const batch = await res.json();
+      all.push(...batch);
+      if(batch.length < 1000) break;
+    }
+    const by = {}; let sh = 0, am = 0;
+    all.forEach(r => {
+      const t = by[r.member_id] || (by[r.member_id] = { shares: 0, amount: 0, all: 0 });
+      const a = Number(r.amount) || 0, n = Number(r.shares) || 0;
+      t.all += a;
+      if(/share\s*capital/i.test(r.fund || '')){ t.amount += a; t.shares += n; sh += n; am += a; }
+      else if(n){ t.shares += n; sh += n; }
+    });
+    state.mpTotals = { loaded: true, loading: false, byMember: by, shares: sh, amount: am, withShares: Object.keys(by).filter(k => by[k].shares > 0).length };
+    if(withShares && state.mpSharesReady === null) state.mpSharesReady = true;
+  }catch(e){
+    state.mpTotals.loading = false;
+    return;
+  }
+  if(state.tab === 'members'){
+    if(typeof updateMemberList === 'function' && document.getElementById('member-list')) updateMemberList();
+    else render();
+  }
+}
+
+// one member's line in the Members list
+function mpMemberTotalLine(id){
+  if(isViewer() || !state.mpTotals.loaded) return '';
+  const t = state.mpTotals.byMember[id];
+  if(!t || (!t.shares && !t.amount)) return '<div style="text-align:right; color:var(--ink-dim); font-size:14px;">\u2014</div>';
+  return '<div style="text-align:right;">' +
+    '<div style="font-size:16px; font-weight:700; color:var(--gold);">' + mpNum(t.shares) + ' sh</div>' +
+    '<div style="font-size:13px; color:var(--ink-dim);">' + mpFmt(t.amount) + '</div></div>';
+}
+
+// totals line above the Members list (everyone, or only the people matching the search)
+function mpOverallTotalsHtml(){
+  if(isViewer() || !state.mpTotals.loaded) return '';
+  const T = state.mpTotals;
+  let h = '<div style="margin-top:8px; padding:10px 12px; border:1px solid var(--gold-dim); border-radius:10px; color:var(--ink);">' +
+    '<div style="font-size:15px;">Overall: <strong style="color:var(--gold); font-size:18px;">' + mpNum(T.shares) + '</strong> shares \u00B7 <strong style="color:var(--gold); font-size:18px;">' + mpFmt(T.amount) + '</strong> Share Capital</div>' +
+    '<div style="font-size:13px; color:var(--ink-dim);">' + T.withShares + ' member ang may shares</div>';
+  if(state.memberSearch && state.memberSearch.trim() && typeof filteredMembers === 'function'){
+    let fs = 0, fa = 0;
+    filteredMembers().forEach(m => { const t = T.byMember[m.id]; if(t){ fs += t.shares; fa += t.amount; } });
+    h += '<div style="font-size:14px; margin-top:4px;">Sa nahanap: <strong>' + mpNum(fs) + '</strong> shares \u00B7 <strong>' + mpFmt(fa) + '</strong></div>';
+  }
+  return h + '</div>';
 }
 
 async function mpDelete(id){
@@ -308,6 +455,7 @@ async function mpDelete(id){
     }
     state.mpRows = state.mpRows.filter(r => String(r.id) !== String(id));
     showToast('Entry deleted.');
+    mpLoadTotals();
   }catch(e){
     showToast('Could not delete: ' + e.message, true);
   }
@@ -336,6 +484,7 @@ async function mpLinkAccount(userId){
 
 // Called by index.html when the Members tab opens: make sure the Admin's account list is loaded for the link dropdown.
 async function loadMemberProfileData(){
+  if(!isViewer()) mpLoadTotals();
   if(isAdmin() && (!state.appUsers || !state.appUsers.length)){
     try{ await fetchAppUsers(); }catch(e){}
   }
@@ -560,6 +709,7 @@ async function mpImpRun(){
       (createdMembers ? '<br>Bagong member na nagawa: <strong>' + createdMembers + '</strong>' : '') +
       '<br><br>Makikita na ng mga member ang kanilang shares sa profile nila.';
     state.mpFor = null;
+    mpLoadTotals();
   }catch(e){
     imp.error = e.message || String(e);
   }
