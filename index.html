@@ -2549,6 +2549,10 @@ function updateMemberList(){
 
 function renderMembers(){
   const em = state.editingMember;
+  if(typeof renderShareImportView === 'function' && state.mpImport && isAdmin()){
+    const imp = renderShareImportView();   // Admin: Excel share-import screen
+    if(imp) return imp;
+  }
   if(typeof renderMemberProfileView === 'function'){
     const mine = renderMemberProfileView();   // a Regular account linked to a member sees its own profile
     if(mine) return mine;
@@ -2571,7 +2575,11 @@ function renderMembers(){
       '<h2>Upload member list (Excel)</h2>' +
       '<div class="setup-note">Pumili ng Excel (.xlsx / .xls) o CSV file. Kukunin ang column na may <strong>Name</strong> at (kung meron) <strong>Contact / Phone</strong>. Kapag walang header, column A = pangalan, column B = contact. Ang mga pangalang nasa listahan na ay hindi na idadagdag ulit.</div>' +
       '<input id="in-member-file" type="file" accept=".xlsx,.xls,.csv" style="margin-top:10px;">' +
-      '<button class="ghost" id="btn-member-template" style="width:100%; margin-top:10px;">Download sample Excel</button>');
+      '<button class="ghost" id="btn-member-template" style="width:100%; margin-top:10px;">Download sample Excel</button>' +
+      (isAdmin() ? '<div style="border-top:1px solid var(--line); margin:18px 0 14px;"></div>' +
+        '<h2>Upload shares (Excel)</h2>' +
+        '<div class="setup-note">I-upload ang <strong>No. of Shares</strong> at total amount ng bawat member. Makikita nila ito sa profile nila.</div>' +
+        '<button class="primary" id="btn-open-share-import" style="width:100%; margin-top:10px;">\uD83D\uDCE5 Upload shares from Excel</button>' : ''));
 
   return '<div class="grid"><div class="panel">' + leftPanel + '</div><div class="panel">' +
     '<h2>All members <span style="font-weight:400; color:var(--ink-dim);">— ' + (isViewer() ? 'view only' : 'tap one to edit') + '</span></h2>' +
@@ -2999,6 +3007,12 @@ create policy "cashier can read contributions" on public.member_contributions fo
 drop policy if exists "member can read own contributions" on public.member_contributions;
 create policy "member can read own contributions" on public.member_contributions for select to authenticated
   using (exists (select 1 from public.members m where m.id = member_contributions.member_id and m.user_id = auth.uid()));</code>
+      </div>
+
+      <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
+        <h2>Member profile &mdash; shares (idagdag)</h2>
+        <div class="setup-note">I-run nang isang beses, pagkatapos ng <strong>Member profile (contributions)</strong> SQL sa itaas. Para ito sa <strong>No. of Shares</strong> ng bawat member.</div>
+        <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">alter table public.member_contributions add column if not exists shares numeric;</code>
       </div>
 
       <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">

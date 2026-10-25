@@ -13,7 +13,9 @@ Object.assign(state, {
   mpLoading: false,
   mpError: '',
   mpBusy: false,
-  mpDraft: { date: '', fund: 'Share Capital', kind: 'in', amount: '', note: '' }
+  mpSharesReady: null,  // does member_contributions have the "shares" column? null = unknown
+  mpImport: null,       // Excel share-import screen (Admin)
+  mpDraft: { date: '', fund: 'Share Capital', kind: 'in', amount: '', shares: '', note: '' }
 });
 
 const MP_DEFAULT_FUNDS = ['Share Capital', 'Statutory Fund', 'Savings'];
@@ -22,6 +24,7 @@ function mpFmt(n){
   const v = Number(n) || 0;
   return (v < 0 ? '-' : '') + money(Math.abs(v));
 }
+function mpNum(n){ return (Number(n) || 0).toLocaleString(undefined, { maximumFractionDigits: 2 }); }
 function mpDate(s){
   if(!s) return '';
   const p = String(s).slice(0, 10).split('-');
@@ -58,6 +61,7 @@ async function mpLoad(memberId){
     } else {
       state.mpRows = await res.json();
       state.mpReady = true;
+      if(state.mpRows.length) state.mpSharesReady = ('shares' in state.mpRows[0]);
     }
   }catch(e){
     state.mpError = e.message || 'Could not load contributions.';
@@ -70,10 +74,11 @@ async function mpLoad(memberId){
 
 // Per-fund totals. Share Capital and Statutory Fund are always shown first, even at 0.
 function mpBalances(rows){
-  const map = {};
+  const map = {}, shares = {};
   rows.forEach(r => {
     const f = String(r.fund || 'Other').trim() || 'Other';
     map[f] = (map[f] || 0) + (Number(r.amount) || 0);
+    shares[f] = (shares[f] || 0) + (Number(r.shares) || 0);
   });
   ['Share Capital', 'Statutory Fund'].forEach(f => { if(!(f in map)) map[f] = 0; });
   const first = ['Share Capital', 'Statutory Fund'];
@@ -84,7 +89,7 @@ function mpBalances(rows){
   });
   let total = 0;
   names.forEach(n => { total += map[n]; });
-  return { map, names, total };
+  return { map, shares, names, total };
 }
 
 function mpBalancesHtml(rows){
@@ -93,6 +98,7 @@ function mpBalancesHtml(rows){
     '<div style="border:1px solid var(--line); border-radius:10px; padding:12px 14px; background:var(--bg-panel-2);">' +
       '<div style="font-size:14px; color:var(--ink-dim);">' + escapeHtml(n) + '</div>' +
       '<div style="font-size:24px; font-weight:700; color:var(--gold); margin-top:2px;">' + mpFmt(b.map[n]) + '</div>' +
+      (b.shares[n] ? '<div style="font-size:16px; margin-top:4px;"><strong>' + mpNum(b.shares[n]) + '</strong> shares</div>' : '') +
     '</div>').join('');
   return '<div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:10px; margin-bottom:12px;">' + cards + '</div>' +
     '<div style="display:flex; justify-content:space-between; align-items:center; padding:12px 14px; border:1px solid var(--gold-dim); border-radius:10px; margin-bottom:6px;">' +
@@ -108,7 +114,7 @@ function mpHistoryHtml(rows, canDelete){
     return '<div style="display:flex; justify-content:space-between; gap:10px; align-items:flex-start; padding:11px 4px; border-bottom:1px solid var(--line);">' +
       '<div style="min-width:0;">' +
         '<div style="font-size:16px; font-weight:600;">' + escapeHtml(r.fund || '') + '</div>' +
-        '<div style="font-size:14px; color:var(--ink-dim);">' + mpDate(r.entry_date) + (r.note ? ' \u00B7 ' + escapeHtml(r.note) : '') + '</div>' +
+        '<div style="font-size:14px; color:var(--ink-dim);">' + mpDate(r.entry_date) + (r.shares ? ' \u00B7 ' + mpNum(r.shares) + ' shares' : '') + (r.note ? ' \u00B7 ' + escapeHtml(r.note) : '') + '</div>' +
       '</div>' +
       '<div style="display:flex; align-items:center; gap:8px; flex-shrink:0;">' +
         '<span style="font-size:17px; font-weight:700; color:' + (amt < 0 ? 'var(--neg)' : 'var(--pos)') + ';">' + (amt > 0 ? '+' : '') + mpFmt(amt) + '</span>' +
@@ -208,6 +214,7 @@ function memberProfilePanelHtml(em){
         '<option value="out"' + (d.kind === 'out' ? ' selected' : '') + '>Withdrawal (bawas)</option>' +
       '</select></div>' +
       '<div class="field"><label>Amount</label><input id="mp-amount" type="number" inputmode="decimal" step="0.01" min="0" value="' + escapeHtml(d.amount) + '" placeholder="0.00"></div>' +
+      (state.mpSharesReady === false ? '' : '<div class="field"><label>No. of shares (optional, para sa Share Capital)</label><input id="mp-shares" type="number" inputmode="decimal" step="1" min="0" value="' + escapeHtml(d.shares || '') + '" placeholder="e.g. 25"></div>') +
       '<div class="field"><label>Note (optional)</label><input id="mp-note" value="' + escapeHtml(d.note) + '" placeholder="e.g. OR # / remarks"></div>' +
       '<button class="primary" id="mp-add"' + (state.mpBusy ? ' disabled' : '') + '>' + (state.mpBusy ? 'Saving...' : 'Add') + '</button>' +
     '</div>';
@@ -231,11 +238,14 @@ function bindMemberProfile(app){
   if(kind) kind.addEventListener('change', () => { d.kind = kind.value; });
   const amount = document.getElementById('mp-amount');
   if(amount) amount.addEventListener('input', () => { d.amount = amount.value; });
+  const shares = document.getElementById('mp-shares');
+  if(shares) shares.addEventListener('input', () => { d.shares = shares.value; });
   const note = document.getElementById('mp-note');
   if(note) note.addEventListener('input', () => { d.note = note.value; });
 
   const addBtn = document.getElementById('mp-add');
   if(addBtn) addBtn.addEventListener('click', mpAdd);
+  if(typeof mpBindImport === 'function') mpBindImport(app);
 
   app.querySelectorAll('[data-mp-del]').forEach(b => {
     b.addEventListener('click', ev => { ev.stopPropagation(); mpDelete(b.getAttribute('data-mp-del')); });
@@ -263,7 +273,11 @@ async function mpAdd(){
         fund: fund,
         amount: (d.kind === 'out' ? -1 : 1) * Math.round(amt * 100) / 100,
         note: String(d.note || '').trim() || null
-      }])
+      }].map(o => {
+        const sh = Number(d.shares);
+        if(isFinite(sh) && sh > 0 && state.mpSharesReady !== false) o.shares = (d.kind === 'out' ? -1 : 1) * sh;
+        return o;
+      }))
     });
     if(!res.ok){
       const err = await res.json().catch(() => ({}));
@@ -272,7 +286,7 @@ async function mpAdd(){
     const rows = await res.json();
     if(rows && rows[0]) state.mpRows.unshift(rows[0]);
     state.mpRows.sort((a, b) => String(b.entry_date).localeCompare(String(a.entry_date)) || (b.id - a.id));
-    d.amount = ''; d.note = '';
+    d.amount = ''; d.shares = ''; d.note = '';
     state.mpBusy = false;
     showToast(d.kind === 'out' ? 'Withdrawal recorded.' : 'Contribution added.');
   }catch(e){
@@ -325,4 +339,265 @@ async function loadMemberProfileData(){
   if(isAdmin() && (!state.appUsers || !state.appUsers.length)){
     try{ await fetchAppUsers(); }catch(e){}
   }
+}
+
+
+/* =====================================================================
+   Excel share import (Admin): No. | Names | No. of Shares | total Amount
+   Matches each Excel name to a member, shows a preview you can fix,
+   then saves one "Share Capital" entry per member (amount + shares).
+   ===================================================================== */
+const MP_IMPORT_TAG = 'Excel import';
+
+function mpNorm(s){
+  return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+function mpCore(s){ return mpNorm(s).split(' ').filter(t => t.length > 1); }   // drop middle initials
+function mpKey(s){ return mpCore(s).sort().join(' '); }
+function mpSim(a, b){
+  const A = new Set(mpCore(a)), B = new Set(mpCore(b));
+  if(!A.size || !B.size) return 0;
+  let inter = 0; A.forEach(t => { if(B.has(t)) inter++; });
+  return inter / (A.size + B.size - inter);
+}
+
+function mpImpOpen(){
+  state.mpImport = { fileName: '', rows: [], asOf: localDateStr(), busy: false, done: null, error: '', existing: null };
+  render();
+  mpImpProbe();
+}
+function mpImpClose(){ state.mpImport = null; render(); }
+
+// Is the "shares" column there? Which members already got an Excel import?
+async function mpImpProbe(){
+  const imp = state.mpImport; if(!imp) return;
+  try{
+    const r1 = await fetch(`${state.supaUrl}/rest/v1/member_contributions?select=shares&limit=1`, { headers: supaHeaders() });
+    if(!r1.ok){
+      const e = await r1.json().catch(() => ({}));
+      state.mpSharesReady = false;
+      if(r1.status === 404 || /does not exist|schema cache/i.test(e.message || '')) state.mpReady = false;
+    } else {
+      state.mpSharesReady = true; state.mpReady = true;
+      const r2 = await fetch(`${state.supaUrl}/rest/v1/member_contributions?select=member_id&fund=eq.Share%20Capital&note=like.${encodeURIComponent(MP_IMPORT_TAG + '*')}&limit=5000`, { headers: supaHeaders() });
+      imp.existing = r2.ok ? new Set((await r2.json()).map(x => x.member_id)) : new Set();
+    }
+  }catch(e){ state.mpSharesReady = false; }
+  if(state.mpImport === imp){ if(imp.rows.length) mpImpMatchAll(); render(); }
+}
+
+function mpImpParse(sheetRows){
+  // find header row + columns by their titles; fall back to A,B,C,D
+  let hdr = -1, cName = 1, cShares = 2, cAmt = 3;
+  for(let i = 0; i < Math.min(sheetRows.length, 15); i++){
+    const cells = (sheetRows[i] || []).map(c => String(c == null ? '' : c).toLowerCase());
+    const n = cells.findIndex(c => /name/.test(c));
+    if(n !== -1){
+      hdr = i; cName = n;
+      const sh = cells.findIndex(c => /share/.test(c) && !/amount|total|₱|php/.test(c));
+      const am = cells.findIndex(c => /amount|total/.test(c));
+      if(sh !== -1) cShares = sh;
+      if(am !== -1) cAmt = am;
+      break;
+    }
+  }
+  const out = [];
+  for(let i = hdr + 1; i < sheetRows.length; i++){
+    const r = sheetRows[i] || [];
+    const name = String(r[cName] == null ? '' : r[cName]).replace(/\s+/g, ' ').trim();
+    if(!name) continue;
+    const shares = Number(String(r[cShares] == null ? '' : r[cShares]).replace(/[^0-9.\-]/g, ''));
+    let amount = Number(String(r[cAmt] == null ? '' : r[cAmt]).replace(/[^0-9.\-]/g, ''));
+    if(!isFinite(shares) || shares <= 0) continue;
+    if(!isFinite(amount) || amount <= 0) amount = shares * 100;
+    out.push({ no: r[0], name, shares, amount, memberId: '', status: 'none', sim: 0 });
+  }
+  return out;
+}
+
+function mpImpMatchAll(){
+  const imp = state.mpImport; if(!imp) return;
+  const members = state.members;
+  const used = new Set();
+  const byKey = {};
+  members.forEach(m => { const k = mpKey(m.full_name); if(k) (byKey[k] = byKey[k] || []).push(m); });
+  imp.rows.forEach(r => { r.memberId = ''; r.status = 'none'; r.sim = 0; });
+  // 1) exact (same words, any order, initials ignored)
+  imp.rows.forEach(r => {
+    const list = (byKey[mpKey(r.name)] || []).filter(m => !used.has(m.id));
+    if(list.length === 1){ r.memberId = list[0].id; r.status = 'exact'; used.add(list[0].id); }
+  });
+  // 2) close matches, to be double-checked by the admin
+  imp.rows.forEach(r => {
+    if(r.memberId) return;
+    let best = null, bs = 0;
+    members.forEach(m => { if(used.has(m.id)) return; const sc = mpSim(r.name, m.full_name); if(sc > bs){ bs = sc; best = m; } });
+    if(best && bs >= 0.6){ r.memberId = best.id; r.status = 'suggest'; r.sim = bs; used.add(best.id); }
+  });
+  // 3) already imported before -> skip by default
+  if(imp.existing) imp.rows.forEach(r => { if(r.memberId && imp.existing.has(r.memberId)){ r.status = 'dup'; r.memberId = ''; } });
+}
+
+function mpImpSummaryHtml(){
+  const imp = state.mpImport;
+  const c = { exact: 0, suggest: 0, none: 0, dup: 0, skip: 0, neu: 0 };
+  let sh = 0, am = 0, tsh = 0, tam = 0;
+  imp.rows.forEach(r => {
+    tsh += r.shares; tam += r.amount;
+    if(r.memberId === '__new') c.neu++;
+    if(r.memberId){ sh += r.shares; am += r.amount; }
+    else c.skip++;
+    if(r.status === 'exact' || r.status === 'manual' || r.status === 'new') c.exact++;
+    else if(r.status === 'suggest') c.suggest++;
+    else if(r.status === 'dup') c.dup++;
+    else c.none++;
+  });
+  return '<div style="font-size:15px; line-height:1.7;">' +
+    'Sa Excel: <strong>' + imp.rows.length + '</strong> na member \u00B7 <strong>' + mpNum(tsh) + '</strong> shares \u00B7 <strong>' + mpFmt(tam) + '</strong><br>' +
+    '\u2714 Tugma: <strong>' + c.exact + '</strong> \u00B7 \u2248 Posibleng tugma (i-check): <strong>' + c.suggest + '</strong> \u00B7 \u2716 Walang tugma: <strong>' + c.none + '</strong>' + (c.dup ? ' \u00B7 \u23ED Na-import na dati: <strong>' + c.dup + '</strong>' : '') + '<br>' +
+    'Ia-upload ngayon: <strong style="color:var(--gold);">' + (imp.rows.length - c.skip) + '</strong> member \u00B7 <strong style="color:var(--gold);">' + mpNum(sh) + '</strong> shares \u00B7 <strong style="color:var(--gold);">' + mpFmt(am) + '</strong>' + (c.neu ? ' (kasama ang ' + c.neu + ' bagong member)' : '') +
+  '</div>';
+}
+
+function renderShareImportView(){
+  const imp = state.mpImport;
+  if(!imp) return null;
+  const back = '<button class="ghost" id="mpi-back" style="margin-bottom:12px;">\u2190 Bumalik sa Members</button>';
+  if(imp.done){
+    return '<div class="panel">' + back + '<h2>\u2705 Tapos na ang upload</h2>' +
+      '<div style="font-size:17px; line-height:1.8;">' + imp.done + '</div></div>';
+  }
+  if(state.mpReady === false || state.mpSharesReady === false){
+    return '<div class="panel">' + back + '<h2>Upload shares (Excel)</h2>' +
+      '<div class="setup-note">Kailangan munang i-run ang SQL na <strong>"Member profile \u2014 shares"</strong> sa Settings (Supabase SQL Editor). Isang linya lang. Pagkatapos, bumalik dito.</div></div>';
+  }
+  if(state.mpSharesReady === null){
+    return '<div class="panel">' + back + '<h2>Upload shares (Excel)</h2><div class="empty">Checking...</div></div>';
+  }
+
+  let body = '<div class="setup-note">Excel (.xlsx / .xls / .csv) na may columns: <strong>No.</strong>, <strong>Names</strong>, <strong>No. of Shares</strong>, <strong>total Amount of share</strong>. Hahanapin ko ang bawat pangalan sa Members list. Makikita mo muna ang preview bago ma-save.</div>' +
+    '<div class="field" style="margin-top:12px;"><label>Excel file</label><input id="mpi-file" type="file" accept=".xlsx,.xls,.csv"></div>';
+  if(imp.error) body += '<div class="setup-note" style="border-color:var(--neg);">' + escapeHtml(imp.error) + '</div>';
+
+  if(imp.rows.length){
+    const opts = state.members.map(m => '<option value="' + escapeHtml(m.id) + '">' + escapeHtml(m.full_name) + '</option>').join('');
+    const badge = { exact: ['\u2714 tugma', 'var(--pos)'], suggest: ['\u2248 i-check', 'var(--gold)'], none: ['\u2716 walang tugma', 'var(--neg)'], manual: ['\u2714 pinili mo', 'var(--pos)'], new: ['\uFF0B bago', 'var(--pos)'], skip: ['\u23ED i-skip', 'var(--ink-dim)'], dup: ['\u23ED na-import na', 'var(--ink-dim)'] };
+    body += '<div class="field"><label>Petsa ng share capital (as of)</label><input id="mpi-date" type="date" value="' + escapeHtml(imp.asOf) + '"></div>' +
+      '<div id="mpi-summary" style="margin:12px 0; padding:12px; border:1px solid var(--gold-dim); border-radius:10px;">' + mpImpSummaryHtml() + '</div>' +
+      '<div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px;">' +
+        '<button class="ghost" id="mpi-allnew">Gawing bagong member lahat ng walang tugma</button>' +
+      '</div>' +
+      '<div>' + imp.rows.map((r, i) => {
+        const b = badge[r.status] || badge.none;
+        const cur = r.memberId;
+        return '<div style="padding:11px 4px; border-bottom:1px solid var(--line);">' +
+          '<div style="display:flex; justify-content:space-between; gap:10px; align-items:flex-start;">' +
+            '<div style="font-size:16px; font-weight:600; min-width:0;">' + escapeHtml(r.name) + '</div>' +
+            '<div style="font-size:15px; white-space:nowrap;"><strong>' + mpNum(r.shares) + '</strong> sh \u00B7 ' + mpFmt(r.amount) + '</div>' +
+          '</div>' +
+          '<div style="display:flex; gap:8px; align-items:center; margin-top:6px;">' +
+            '<span data-mpi-badge="' + i + '" style="font-size:13px; font-weight:600; color:' + b[1] + '; white-space:nowrap;">' + b[0] + '</span>' +
+            '<select data-mpi-row="' + i + '" style="flex:1; min-width:0;">' +
+              '<option value=""' + (cur === '' ? ' selected' : '') + '>\u2014 i-skip \u2014</option>' +
+              '<option value="__new"' + (cur === '__new' ? ' selected' : '') + '>\uFF0B Gawing bagong member</option>' +
+              opts.replace('value="' + escapeHtml(cur) + '"', 'value="' + escapeHtml(cur) + '" selected') +
+            '</select>' +
+          '</div></div>';
+      }).join('') + '</div>' +
+      '<button class="primary" id="mpi-go" style="width:100%; margin-top:16px;"' + (imp.busy ? ' disabled' : '') + '>' + (imp.busy ? 'Ina-upload...' : '\uD83D\uDCE5 I-upload ang shares') + '</button>';
+  }
+  return '<div class="panel">' + back + '<h2>\uD83D\uDCE5 Upload shares (Excel)</h2>' + body + '</div>';
+}
+
+async function mpImpReadFile(file){
+  const imp = state.mpImport; if(!imp || !file) return;
+  imp.error = ''; imp.rows = []; imp.fileName = file.name;
+  try{
+    const XLSX = await ensureXLSX();
+    const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const grid = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: true });
+    imp.rows = mpImpParse(grid);
+    if(!imp.rows.length) imp.error = 'Walang nabasang member (kailangan ng Names at No. of Shares columns).';
+    else mpImpMatchAll();
+  }catch(e){
+    imp.error = 'Hindi mabasa ang file: ' + (e.message || e);
+  }
+  render();
+}
+
+async function mpImpRun(){
+  const imp = state.mpImport;
+  if(!imp || imp.busy || !isAdmin()) return;
+  const todo = imp.rows.filter(r => r.memberId);
+  if(!todo.length){ showToast('Wala pang napiling i-upload.', true); return; }
+  const totalSh = todo.reduce((a, r) => a + r.shares, 0), totalAm = todo.reduce((a, r) => a + r.amount, 0);
+  if(!window.confirm('I-upload ang ' + todo.length + ' member, ' + mpNum(totalSh) + ' shares, ' + mpFmt(totalAm) + '?')) return;
+  imp.busy = true; render();
+  let createdMembers = 0, saved = 0;
+  try{
+    // 1) bagong members
+    const fresh = todo.filter(r => r.memberId === '__new');
+    if(fresh.length){
+      const res = await fetch(`${state.supaUrl}/rest/v1/members`, { method: 'POST', headers: supaHeaders(), body: JSON.stringify(fresh.map(r => ({ full_name: r.name }))) });
+      if(!res.ok){ const e = await res.json().catch(() => ({})); throw new Error('Hindi nagawa ang bagong members: ' + (e.message || res.status)); }
+      const made = await res.json();
+      made.forEach(m => { const r = fresh.find(x => x.name === m.full_name && x.memberId === '__new'); if(r) r.memberId = m.id; });
+      createdMembers = made.length;
+    }
+    // 2) share capital entries, in small batches
+    const payload = todo.filter(r => r.memberId && r.memberId !== '__new').map(r => ({
+      member_id: r.memberId, entry_date: imp.asOf || localDateStr(), fund: 'Share Capital',
+      amount: r.amount, shares: r.shares, note: MP_IMPORT_TAG + ': ' + imp.fileName
+    }));
+    for(let i = 0; i < payload.length; i += 40){
+      const res = await fetch(`${state.supaUrl}/rest/v1/member_contributions`, { method: 'POST', headers: supaHeaders(), body: JSON.stringify(payload.slice(i, i + 40)) });
+      if(!res.ok){ const e = await res.json().catch(() => ({})); throw new Error('Na-save ang ' + saved + ' member bago huminto: ' + (e.message || res.status)); }
+      saved += payload.length > 0 ? Math.min(40, payload.length - i) : 0;
+    }
+    imp.done = 'Na-save: <strong>' + saved + '</strong> member \u00B7 <strong>' + mpNum(totalSh) + '</strong> shares \u00B7 <strong>' + mpFmt(totalAm) + '</strong>' +
+      (createdMembers ? '<br>Bagong member na nagawa: <strong>' + createdMembers + '</strong>' : '') +
+      '<br><br>Makikita na ng mga member ang kanilang shares sa profile nila.';
+    state.mpFor = null;
+  }catch(e){
+    imp.error = e.message || String(e);
+  }
+  imp.busy = false;
+  try{ await fetchMembers(); }catch(e){}
+  render();
+}
+
+function mpBindImport(app){
+  const open = document.getElementById('btn-open-share-import');
+  if(open) open.addEventListener('click', mpImpOpen);
+  const imp = state.mpImport; if(!imp) return;
+  const back = document.getElementById('mpi-back');
+  if(back) back.addEventListener('click', mpImpClose);
+  const file = document.getElementById('mpi-file');
+  if(file) file.addEventListener('change', () => { if(file.files && file.files[0]) mpImpReadFile(file.files[0]); });
+  const date = document.getElementById('mpi-date');
+  if(date) date.addEventListener('input', () => { imp.asOf = date.value; });
+  app.querySelectorAll('select[data-mpi-row]').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const r = imp.rows[Number(sel.getAttribute('data-mpi-row'))];
+      const idx = Number(sel.getAttribute('data-mpi-row'));
+      r.memberId = sel.value;
+      r.status = r.memberId === '' ? 'skip' : (r.memberId === '__new' ? 'new' : 'manual');
+      const bd = app.querySelector('[data-mpi-badge="' + idx + '"]');
+      if(bd){
+        const t = { skip: ['\u23ED i-skip', 'var(--ink-dim)'], new: ['\uFF0B bago', 'var(--pos)'], manual: ['\u2714 pinili mo', 'var(--pos)'] }[r.status];
+        bd.textContent = t[0]; bd.style.color = t[1];
+      }
+      const sum = document.getElementById('mpi-summary');
+      if(sum) sum.innerHTML = mpImpSummaryHtml();
+    });
+  });
+  const allNew = document.getElementById('mpi-allnew');
+  if(allNew) allNew.addEventListener('click', () => {
+    imp.rows.forEach(r => { if(!r.memberId && r.status !== 'dup') r.memberId = '__new'; });
+    render();
+  });
+  const go = document.getElementById('mpi-go');
+  if(go) go.addEventListener('click', mpImpRun);
 }
