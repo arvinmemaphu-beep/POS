@@ -556,6 +556,12 @@ const state = {
   missInput: {},         // {item_id: {pay, found}} typed on a Missing consignment
   voidCol: false,         // true once sales / ledger_entries / consignments have the void columns (see Settings SQL)
   voidPrompt: null,       // {kind, id, label, reason, busy} while the Void reason popup is open (Admin-only)
+  recvReady: false,       // true once the Utang (receivables) columns/table exist (see Settings SQL: Utang)
+  recvSales: [],          // sales on utang, each with its receivable_payments
+  recvLoading: false,
+  recvFilter: 'open',     // 'open' = may balance pa, 'all' = pati bayad na
+  utangPrompt: null,      // {name, down, remarks} while the Utang popup in Sell is open
+  recvPayPrompt: null,    // {saleId|null, key, amount, remarks, busy} while the Bayad popup is open
 };
 
 function el(html){
@@ -665,7 +671,7 @@ async function restoreAuth(){
     await fetchCurrentUser();
     await loadProfile();
     const ok = await testConnection();
-    if(ok){ await checkDiscountColumn(); await checkFreeColumn(); await checkConsignMemberColumn(); await checkLedgerReady(); await checkLedgerDepositColumn(); await checkLedgerTransferColumn(); await checkVoidColumn(); await checkMissingReady(); await fetchProducts(); await fetchMembers(); }
+    if(ok){ await checkDiscountColumn(); await checkFreeColumn(); await checkConsignMemberColumn(); await checkLedgerReady(); await checkLedgerDepositColumn(); await checkLedgerTransferColumn(); await checkVoidColumn(); await checkMissingReady(); await checkReceivableReady(); await fetchProducts(); await fetchMembers(); }
     return ok;
   }catch(e){
     clearSession();
@@ -702,7 +708,7 @@ async function login(email, password){
     await checkLedgerReady();
     await checkLedgerDepositColumn();
     await checkLedgerTransferColumn();
-    await checkVoidColumn(); await checkMissingReady();
+    await checkVoidColumn(); await checkMissingReady(); await checkReceivableReady();
     state.tab = 'pos';
     navStack.length = 0;
     await fetchProducts();
@@ -832,6 +838,10 @@ function switchTab(tab, fromBack){
     showToast('Settings is available to Admin only.', true);
     return;
   }
+  if(tab === 'receivables' && isViewer()){
+    showToast('Utang is available to Admin and Cashier only.', true);
+    return;
+  }
   if(tab === 'report' && !canSeeReport()){
     showToast('The report is available to Admin and Regular users only.', true);
     return;
@@ -847,6 +857,7 @@ function switchTab(tab, fromBack){
   if(tab === 'history') fetchSales();
   if(tab === 'items') fetchSaleItems();
   if(tab === 'consign') fetchConsignments();
+  if(tab === 'receivables') fetchReceivables();
   if(tab === 'ledger'){ fetchLedger(); loadSuppliesForCurrentTab(); }
   if(tab === 'supplies') loadSuppliesForCurrentTab();
   if(tab === 'report') fetchReport();
@@ -872,7 +883,7 @@ async function fetchSales(){
   if(!state.connected) return;
   state.loading = true; render();
   try{
-    const res = await fetch(`${state.supaUrl}/rest/v1/sales?select=*,sale_items(${saleItemCols()})&order=created_at.desc&limit=50`, { headers: supaHeaders() });
+    const res = await fetch(`${state.supaUrl}/rest/v1/sales?select=*,sale_items(${saleItemCols()})${state.recvReady ? ',receivable_payments(amount,voided)' : ''}&order=created_at.desc&limit=50`, { headers: supaHeaders() });
     if(!res.ok) throw new Error('Failed to load sales');
     state.sales = await res.json();
   }catch(e){
@@ -885,7 +896,7 @@ async function fetchSaleItems(){
   if(!state.connected) return;
   state.loading = true; render();
   try{
-    const res = await fetch(`${state.supaUrl}/rest/v1/sale_items?select=*,sales(created_at${state.voidCol ? ',voided' : ''})&order=created_at.desc&limit=500`, { headers: supaHeaders() });
+    const res = await fetch(`${state.supaUrl}/rest/v1/sale_items?select=*,sales(created_at${state.voidCol ? ',voided' : ''}${state.recvReady ? ',is_receivable,buyer_name' : ''})&order=created_at.desc&limit=500`, { headers: supaHeaders() });
     if(!res.ok) throw new Error('Failed to load sale items');
     state.saleItems = (await res.json()).filter(it => !(it.sales && it.sales.voided)); // voided sales are left out of the Daily report
   }catch(e){
@@ -971,6 +982,7 @@ async function backupToExcel(){
       ['Consignments', 'consignments', 'select=*&order=id.asc'],
       ['Consignment Items', 'consignment_items', 'select=*&order=id.asc'],
       ['Ledger', 'ledger_entries', 'select=*&order=id.asc'],
+      ['Utang Payments', 'receivable_payments', 'select=*&order=created_at.asc'],
       ['Product Logs', 'product_logs', 'select=*&order=id.asc'],
       ['Users', 'profiles', 'select=*']
     ];
@@ -1339,13 +1351,13 @@ function updateChangeDisplay(){
   }
 }
 
-async function checkout(){
+async function checkout(recv){
   if(blockViewer()) return;
   if(state.cart.length===0) return;
   if(state.checkingOut) return; // prevent double-submit from fast/repeated taps
   const total = cartTotal();
   const tenderedNum = Number(state.tendered) || 0;
-  if(total > 0 && (state.tendered === '' || tenderedNum < total)){
+  if(!recv && total > 0 && (state.tendered === '' || tenderedNum < total)){
     showToast('Enter a valid amount received (must cover the total).', true);
     return;
   }
@@ -1358,7 +1370,7 @@ async function checkout(){
   try{
     const saleRes = await fetch(`${state.supaUrl}/rest/v1/sales`, {
       method:'POST', headers: supaHeaders(),
-      body: JSON.stringify([{ total }])
+      body: JSON.stringify([recv ? { total, is_receivable: true, buyer_name: recv.name, receivable_remarks: recv.remarks || null } : { total }])
     });
     if(!saleRes.ok) throw new Error('Checkout failed');
     const saleRows = await saleRes.json();
@@ -1396,9 +1408,15 @@ async function checkout(){
     state.saleMemberId = '';
     await fetchProducts();
     const itemsSummary = itemRows.map(r => `${r.qty}x ${r.product_name}${r.is_free ? ' (FREE)' : ''}`).join(', ');
-    if(total > 0) await postSaleToLedger(saleId, total, itemsSummary); // all-free sales have nothing to put in the cash ledger
+    if(recv){
+      // utang: no cash comes in yet, so nothing goes to the Ledger until a payment is recorded
+      if(recv.down > 0){
+        try{ await addReceivablePayment({ id: saleId, buyer_name: recv.name }, recv.down, 'Paunang bayad'); }
+        catch(pe){ showToast('Na-save ang utang pero hindi ang paunang bayad: ' + pe.message + '. Gamitin ang Bayad sa Utang tab.', true); }
+      }
+    } else if(total > 0) await postSaleToLedger(saleId, total, itemsSummary); // all-free sales have nothing to put in the cash ledger
     if(state.tab === 'ledger') await fetchLedger();
-    showToast(total > 0 ? 'Sale recorded — ' + money(total) : 'Freebie recorded — ' + money(0));
+    showToast(recv ? ('Utang na-record: ' + recv.name + ' \u00B7 ' + money(total)) : total > 0 ? 'Sale recorded — ' + money(total) : 'Freebie recorded — ' + money(0));
   }catch(e){
     showToast('Checkout failed: ' + e.message, true);
   }
@@ -1784,6 +1802,7 @@ async function refreshAfterVoid(){
   await fetchSales();
   await fetchSaleItems();
   await fetchConsignments();
+  if(state.recvReady) await fetchReceivables();
   if(state.ledgerReady) await fetchLedger();
 }
 
@@ -1806,6 +1825,7 @@ async function confirmVoid(){
     else if(vp.kind === 'consign-settle') ok = await voidConsignSettlement(vp.id, reason);
     else if(vp.kind === 'consign-event') ok = await voidConsignEvent(vp.id, reason);
     else if(vp.kind === 'ledger') ok = await voidLedgerEntry(vp.id, reason);
+    else if(vp.kind === 'recv-payment') ok = await voidReceivablePayment(vp.id, reason);
     else if(vp.kind === 'supply-use') ok = await voidSupplyUse(vp.id, reason);
   }catch(e){
     showToast('Void failed: ' + e.message, true);
@@ -1828,6 +1848,25 @@ async function voidSale(saleId, reason){
     if(!okL) throw new Error('Na-void na ang sale, pero hindi ma-void ang Ledger entry (baka naka-block ng permission). I-run ang "Ledger fix" SQL.');
     await refreshAfterVoid();
     showToast('Ledger entry na-void.');
+    return true;
+  }
+
+  // a sale on utang: void the sale, every payment on it (with their Ledger entries) and put the stock back
+  if(sale.is_receivable){
+    await patchRows(`sales?id=eq.${saleId}`, voidStamp(reason), true);
+    await patchRows(`receivable_payments?sale_id=eq.${saleId}&voided=is.false`, voidStamp(reason));
+    if(state.ledgerReady) await patchRows(`ledger_entries?sale_id=eq.${saleId}&voided=is.false`, voidStamp(reason));
+    const ri = await fetch(`${state.supaUrl}/rest/v1/sale_items?select=product_id,product_name,qty&sale_id=eq.${saleId}`, { headers: supaHeaders() });
+    if(!ri.ok) throw new Error('Na-void ang utang pero hindi ma-load ang items para ibalik ang stock. Ibalik ang stock manual.');
+    const rmap = {};
+    (await ri.json()).forEach(i => {
+      let pid = i.product_id;
+      if(!pid){ const p = state.products.find(x => x.name === i.product_name); pid = p ? p.id : null; }
+      if(pid) rmap[pid] = (rmap[pid] || 0) + (Number(i.qty) || 0);
+    });
+    await adjustStockMap(rmap, +1, q => 'Utang voided (+' + q + ')', 'void-sale');
+    await refreshAfterVoid();
+    showToast('Utang na-void. Naibalik ang stock at na-void ang mga bayad (kung meron).');
     return true;
   }
 
@@ -1973,6 +2012,7 @@ async function voidLedgerEntry(id, reason){
   if(!e) throw new Error('Hindi mahanap ang entry. I-refresh ang Ledger.');
   if(e.voided) throw new Error('Na-void na ang entry na ito.');
   if(e.source === 'sale') throw new Error('Ito ay galing sa Sale \u2014 i-void ang sale sa History o Consign.');
+  if(e.source === 'receivable' && e.receivable_payment_id) return await voidReceivablePayment(e.receivable_payment_id, reason);
   let undone = null;
   if(e.supply_id){
     await ensureSuppliesModule();
@@ -1994,14 +2034,15 @@ async function voidLedgerEntry(id, reason){
 function voidModalMarkup(){
   const vp = state.voidPrompt;
   if(!vp) return '';
-  const titles = { 'sale':'Void sale', 'consign-sent':'Void consignment', 'consign-settle':'Void settlement', 'consign-event':'Void bayad / nakita', 'supply-use':'Void gamit ng supply', 'ledger':'Void ledger entry' };
+  const titles = { 'sale':'Void sale', 'consign-sent':'Void consignment', 'consign-settle':'Void settlement', 'consign-event':'Void bayad / nakita', 'supply-use':'Void gamit ng supply', 'ledger':'Void ledger entry', 'recv-payment':'Void bayad ng utang' };
   const notes = {
     'sale': 'Ibabalik sa stock ang mga item nito, at hindi na isasama sa Daily, Monthly report at Ledger. Mananatili ito sa History bilang VOIDED.',
     'consign-sent': 'Ibabalik sa stock ang lahat ng naipadala. Mamarkahang VOIDED ang consignment at hindi na ito puwedeng i-settle.',
     'consign-settle': 'Ibabalik ang consignment sa "Out" para ma-settle ulit nang tama. Ive-void ang sale at Ledger entry nito, at babawiin sa stock ang mga ibinalik.',
     'consign-event': 'Ive-void ang bayad (sale at Ledger entry) o ang pagbalik sa stock ng nakitang piraso, at babalik sa "Missing" ang mga ito.',
     'supply-use': 'Ibabalik sa stock ng supply ang ginamit na dami. Mananatili sa history bilang VOIDED.',
-    'ledger': 'Hindi na isasama sa Ledger balance at Expense report. Mananatili sa listahan bilang VOIDED.'
+    'ledger': 'Hindi na isasama sa Ledger balance at Expense report. Mananatili sa listahan bilang VOIDED.',
+    'recv-payment': 'Ive-void ang bayad at ang Ledger entry nito, at babalik ang balance ng utang. Mananatili sa listahan bilang VOIDED.'
   };
   const chips = ['Maling encode', 'Dapat Member pala', 'Maling presyo/discount', 'Test lang'].map(t => `<button type="button" class="chip" data-void-chip="${t}">${t}</button>`).join('');
   return `
@@ -3302,6 +3343,44 @@ create policy "admin can void consignment events" on consignment_events for upda
 
 notify pgrst, 'reload schema';</code>
       </div>
+
+      <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
+        <h2>Utang (Receivables)</h2>
+        <div class="setup-note">I-run ito nang isang beses. Para sa mga order na kinuha na pero babayaran pa lang. Bibilangin ang benta at stock sa <b>araw ng order</b>; ang <b>Ledger (cash)</b> ay gagalaw lang kapag may bayad. May bagong <b>Utang</b> tab, at <b>Utang</b> button sa Sell. Admin at Cashier lang ang makakakita ng Utang tab. Pagkatapos i-run, i-refresh ang page.</div>
+        <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">alter table sales add column if not exists is_receivable boolean not null default false;
+alter table sales add column if not exists buyer_name text;
+alter table sales add column if not exists receivable_remarks text;
+
+create table if not exists receivable_payments (
+  id uuid primary key default gen_random_uuid(),
+  sale_id uuid not null references sales(id) on delete cascade,
+  amount numeric not null check (amount &gt; 0),
+  paid_on date not null default current_date,
+  remarks text,
+  created_by text,
+  created_at timestamptz not null default now(),
+  voided boolean not null default false,
+  void_reason text,
+  voided_at timestamptz,
+  voided_by text
+);
+
+alter table ledger_entries add column if not exists receivable_payment_id uuid;
+
+alter table receivable_payments enable row level security;
+
+drop policy if exists "authenticated can read receivable payments" on receivable_payments;
+drop policy if exists "staff can add receivable payments" on receivable_payments;
+drop policy if exists "admin can void receivable payments" on receivable_payments;
+create policy "authenticated can read receivable payments" on receivable_payments for select to authenticated using (true);
+create policy "staff can add receivable payments" on receivable_payments for insert to authenticated
+  with check (public.current_user_role() in ('admin','cashier'));
+create policy "admin can void receivable payments" on receivable_payments for update to authenticated
+  using (public.current_user_role() = 'admin')
+  with check (public.current_user_role() = 'admin');
+
+notify pgrst, 'reload schema';</code>
+      </div>
     </div>
   </div>`;
 }
@@ -3414,6 +3493,7 @@ function renderPOS(){
       ` : ''}
       ${hasCart && total === 0 ? '<div class="setup-note" style="margin-top:12px;">Libre lahat ng nasa cart \u2014 walang babayaran. Mare-record ito na \u20B10.00 kasama ang remarks.</div>' : ''}
       <button class="primary" id="btn-checkout" ${!canCheckout?'disabled':''}>${state.checkingOut ? 'Saving...' : (hasCart && total === 0 ? 'Record freebie' : 'Complete sale')}</button>
+      ${(hasCart && total > 0 && !isViewer()) ? `<button class="ghost" id="btn-utang" style="width:100%; margin-top:8px;" ${state.checkingOut ? 'disabled' : ''}>\uD83D\uDCD2 Utang (bayad later)</button>` : ''}
     </div>
   </div>`;
 }
@@ -3513,12 +3593,12 @@ function renderLedger(){
     return `
     <div class="sale-row" ${e.voided ? 'style="opacity:0.65;"' : ''}>
       <div class="head">
-        <span>${escapeHtml(dateLabel)}${e.qty ? ' \u00B7 ' + escapeHtml(e.qty) : ''}${e.pic ? ' \u00B7 ' + escapeHtml(e.pic) : ''}${e.source === 'sale' ? ' <span class="tag closed">Sale</span>' : ''}${e.is_deposit ? ' <span class="tag">Deposit</span>' : ''}${e.is_transfer ? ' <span class="tag">Transfer</span>' : ''}${e.voided ? ' <span class="tag void">VOIDED</span>' : ''}</span>
+        <span>${escapeHtml(dateLabel)}${e.qty ? ' \u00B7 ' + escapeHtml(e.qty) : ''}${e.pic ? ' \u00B7 ' + escapeHtml(e.pic) : ''}${e.source === 'sale' ? ' <span class="tag closed">Sale</span>' : ''}${e.source === 'receivable' ? ' <span class="tag closed">Bayad utang</span>' : ''}${e.is_deposit ? ' <span class="tag">Deposit</span>' : ''}${e.is_transfer ? ' <span class="tag">Transfer</span>' : ''}${e.voided ? ' <span class="tag void">VOIDED</span>' : ''}</span>
         <span class="amt mono">${money(e.balance)}</span>
       </div>
       <div class="items" style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
         <span ${e.voided ? 'style="text-decoration:line-through;"' : ''}>${escapeHtml(e.details)}${Number(e.amount_in)>0 ? ' \u00B7 <span style="color:var(--pos);">+' + money(e.amount_in) + '</span>' : ''}${Number(e.amount_out)>0 ? ' \u00B7 <span style="color:var(--neg);">-' + money(e.amount_out) + '</span>' : ''}</span>
-        ${(isAdmin() && !e.voided && state.ledgerTransferCol && e.source !== 'sale' && Number(e.amount_in) > 0 && !(Number(e.amount_out) > 0)) ? `<button class="icon-btn" data-toggle-transfer="${e.id}" data-transfer-now="${e.is_transfer ? '1' : '0'}" title="${e.is_transfer ? 'Unmark as cash transfer' : 'Mark as cash transfer (galing bangko, hindi sales)'}">${e.is_transfer ? '\u2713' : '\u270E'}</button>` : ''}
+        ${(isAdmin() && !e.voided && state.ledgerTransferCol && e.source !== 'sale' && e.source !== 'receivable' && Number(e.amount_in) > 0 && !(Number(e.amount_out) > 0)) ? `<button class="icon-btn" data-toggle-transfer="${e.id}" data-transfer-now="${e.is_transfer ? '1' : '0'}" title="${e.is_transfer ? 'Unmark as cash transfer' : 'Mark as cash transfer (galing bangko, hindi sales)'}">${e.is_transfer ? '\u2713' : '\u270E'}</button>` : ''}
         ${(isAdmin() && !e.voided && state.ledgerDepositCol && Number(e.amount_out) > 0) ? `<button class="icon-btn" data-toggle-deposit="${e.id}" data-deposit-now="${e.is_deposit ? '1' : '0'}" title="${e.is_deposit ? 'Unmark as deposit' : 'Mark as cash deposit (exclude from Expense Report)'}">${e.is_deposit ? '\u2713' : '\u270E'}</button>` : ''}
       </div>
       ${e.voided ? voidNoteHtml(e) : ((isAdmin() && state.voidCol) ? (e.source !== 'sale'
@@ -3610,7 +3690,7 @@ async function fetchReport(){
     const all = [];
     const step = 1000;
     for(let from = 0; ; from += step){
-      const res = await fetch(`${state.supaUrl}/rest/v1/sales?select=created_at,total,sale_items(${saleItemCols()})&${range('created_at')}${notVoidedQ()}&order=created_at.asc`,
+      const res = await fetch(`${state.supaUrl}/rest/v1/sales?select=created_at,total,sale_items(${saleItemCols()})${state.recvReady ? ',is_receivable,receivable_payments(amount,voided)' : ''}&${range('created_at')}${notVoidedQ()}&order=created_at.asc`,
         { headers: Object.assign({}, supaHeaders(), { 'Range-Unit':'items', 'Range': `${from}-${from+step-1}` }) });
       if(!res.ok) throw new Error('Failed to load sales');
       const rows = await res.json();
@@ -3638,10 +3718,11 @@ async function fetchReport(){
 }
 function computeReport(){
   const days = {}, prods = {}, freebies = [];
-  let total = 0, freeQty = 0;
+  let total = 0, freeQty = 0, recvTotal = 0, recvUnpaid = 0;
   state.reportSales.forEach(s=>{
     const t = Number(s.total) || 0;
     total += t;
+    if(s.is_receivable){ recvTotal += t; recvUnpaid += recvBalance(s); }
     const day = new Date(s.created_at).getDate();
     days[day] = (days[day] || 0) + t;
     (s.sale_items || []).forEach(i=>{
@@ -3665,7 +3746,7 @@ function computeReport(){
   Object.keys(days).forEach(d=>{ if(!bestDay || days[d] > days[bestDay]) bestDay = d; });
   const consignValue = state.reportConsign.reduce((sum,c)=>
     sum + (c.consignment_items || []).reduce((x,i)=> x + consignUnitPrice(i, c) * (i.qty_sold || 0), 0), 0);
-  return { total, count, avg: count ? total / count : 0, days, products, bestDay, consignCount: state.reportConsign.length, consignValue, freebies, freeQty };
+  return { total, count, avg: count ? total / count : 0, days, products, bestDay, consignCount: state.reportConsign.length, consignValue, freebies, freeQty, recvTotal, recvUnpaid };
 }
 function reportMonthLabel(){
   const r = reportRange();
@@ -3804,6 +3885,7 @@ function renderReport(){
       ${c.freeQty ? `<div class="rpt-stat"><div class="lbl">Freebies given</div><div class="val mono">${c.freeQty}</div><div class="lbl" style="margin:2px 0 0;">pcs, ${money(0)}</div></div>` : ''}
     </div>
     ${c.consignCount ? `<div class="setup-note" style="margin:0 0 14px;">${c.consignCount} consignment${c.consignCount>1?'s':''} settled this month, worth ${money(c.consignValue)}. This is already included in Total sales.</div>` : ''}
+    ${c.recvTotal > 0 ? `<div class="setup-note" style="margin:0 0 14px;">Utang (hindi pa cash) ngayong buwan: ${money(c.recvTotal)} ang inorder, ${money(c.recvUnpaid)} ang balance pa. Kasama na ito sa Total sales; papasok sa Ledger kapag nabayaran.</div>` : ''}
     <h2>${dEx ? 'Sales and expenses per day' : 'Sales per day'}</h2>
     ${dEx ? chartLegend() : ''}
     <div style="margin-bottom:16px;">${dailyChartSvg(c.days, dEx, r.y, r.m, dEx ? 'Sales and expenses per day' : 'Sales per day')}</div>
@@ -4000,7 +4082,7 @@ function renderHistory(){
     return `
     <div class="sale-row" ${vd ? 'style="opacity:0.65;"' : ''}>
       <div class="head">
-        <span>${d.toLocaleString()}${vd ? ' <span class="tag void">VOIDED</span>' : ''}</span>
+        <span>${d.toLocaleString()}${s.is_receivable ? recvTagHtml(s) : ''}${vd ? ' <span class="tag void">VOIDED</span>' : ''}</span>
         <span class="amt mono" ${vd ? 'style="text-decoration:line-through;"' : ''}>${money(s.total)}</span>
       </div>
       <div class="items">${itemsStr}</div>
@@ -4059,7 +4141,7 @@ function renderSaleItems(){
         <span class="amt mono">${money(it.price * it.qty)}</span>
       </div>
       <div class="items" style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
-        <span>${it.is_free ? '<span class="tag free">\uD83C\uDF81 FREE</span> ' : ''}${it.qty}\u00D7 ${it.product_name} @ ${money(it.price)}${it.is_free ? '<div class="free-note">Remarks: ' + escapeHtml(it.free_remarks || '(walang remarks)') + '</div>' : ''}</span>
+        <span>${(it.sales && it.sales.is_receivable) ? '<span class="tag open">UTANG' + (isViewer() || !it.sales.buyer_name ? '' : ' \u00B7 ' + escapeHtml(it.sales.buyer_name)) + '</span> ' : ''}${it.is_free ? '<span class="tag free">\uD83C\uDF81 FREE</span> ' : ''}${it.qty}\u00D7 ${it.product_name} @ ${money(it.price)}${it.is_free ? '<div class="free-note">Remarks: ' + escapeHtml(it.free_remarks || '(walang remarks)') + '</div>' : ''}</span>
         ${isAdmin() ? `<button class="icon-btn" data-edit-sale-item="${it.id}" title="Correct product name">\u270E</button>` : ''}
       </div>
     </div>`;
@@ -4266,6 +4348,319 @@ function themeMarkup(){
   '</div>';
 }
 
+/* ---------- Utang / Receivables ---------- */
+// An order that was taken now but will be paid later. It is a normal row in `sales` (is_receivable = true), so stock,
+// Daily, Monthly and History count it on the ORDER date. The Ledger (cash book) only moves when a payment is recorded.
+
+async function checkReceivableReady(){
+  try{
+    const a = await fetch(`${state.supaUrl}/rest/v1/sales?select=is_receivable,buyer_name&limit=1`, { headers: supaHeaders() });
+    const b = await fetch(`${state.supaUrl}/rest/v1/receivable_payments?select=id&limit=1`, { headers: supaHeaders() });
+    let c = true;
+    if(state.ledgerReady){
+      const r = await fetch(`${state.supaUrl}/rest/v1/ledger_entries?select=receivable_payment_id&limit=1`, { headers: supaHeaders() });
+      c = r.ok;
+    }
+    state.recvReady = a.ok && b.ok && c;
+  }catch(e){
+    state.recvReady = false;
+  }
+}
+function recvPaid(s){
+  return (s.receivable_payments || []).filter(p => !p.voided).reduce((t, p) => t + (Number(p.amount) || 0), 0);
+}
+function recvBalance(s){
+  return Math.max(0, Math.round(((Number(s.total) || 0) - recvPaid(s)) * 100) / 100);
+}
+function recvTagHtml(s){
+  if(isViewer()) return ' <span class="tag open">UTANG</span>';
+  const bal = recvBalance(s);
+  return ' <span class="tag open">UTANG' + (s.buyer_name ? ' \u00B7 ' + escapeHtml(s.buyer_name) : '') + ' \u00B7 ' + (bal > 0 ? 'balance ' + money(bal) : 'bayad na') + '</span>';
+}
+
+async function fetchReceivables(){
+  if(!state.connected || !state.recvReady) return;
+  state.recvLoading = true; render();
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/sales?select=id,created_at,total,buyer_name,receivable_remarks,sale_items(${saleItemCols()}),receivable_payments(id,amount,paid_on,remarks,created_at,voided,void_reason,voided_at,voided_by)&is_receivable=is.true${notVoidedQ()}&order=created_at.asc&limit=1000`, { headers: supaHeaders() });
+    if(!res.ok) throw new Error('Failed to load utang');
+    state.recvSales = await res.json();
+  }catch(e){
+    showToast('Could not load Utang: ' + e.message, true);
+  }
+  state.recvLoading = false; render();
+}
+
+// customers with utang, grouped by name (same name = same customer)
+function recvGroups(){
+  const map = {};
+  state.recvSales.forEach(s => {
+    const k = normName(s.buyer_name) || '(walang pangalan)';
+    const g = map[k] || (map[k] = { key: k, name: (s.buyer_name || '').trim() || '(walang pangalan)', sales: [], total: 0, paid: 0, balance: 0 });
+    g.sales.push(s);
+    g.total += Number(s.total) || 0;
+    g.paid += recvPaid(s);
+    g.balance += recvBalance(s);
+  });
+  return Object.values(map).map(g => { g.balance = Math.round(g.balance * 100) / 100; g.total = Math.round(g.total * 100) / 100; g.paid = Math.round(g.paid * 100) / 100; return g; });
+}
+
+// Saves one payment on one utang sale, then puts the cash in the Ledger (Cash In) linked to that payment.
+async function addReceivablePayment(sale, amount, remarks){
+  const amt = Math.round(Number(amount) * 100) / 100;
+  if(!(amt > 0)) throw new Error('Invalid amount');
+  const res = await fetch(`${state.supaUrl}/rest/v1/receivable_payments`, {
+    method: 'POST', headers: supaHeaders(),
+    body: JSON.stringify([{ sale_id: sale.id, amount: amt, remarks: remarks || null, paid_on: localDateStr(), created_by: (state.user && state.user.email) ? state.user.email : null }])
+  });
+  let rows = [];
+  try{ rows = await res.json(); }catch(e){}
+  if(!res.ok || !Array.isArray(rows) || !rows[0]) throw new Error((rows && rows.message) || 'Hindi na-save ang bayad');
+  if(state.ledgerReady){
+    const lr = await fetch(`${state.supaUrl}/rest/v1/ledger_entries`, {
+      method: 'POST', headers: supaHeaders(),
+      body: JSON.stringify([{
+        entry_date: localDateStr(),
+        details: 'Bayad utang: ' + (sale.buyer_name || '') + (remarks ? ' (' + remarks + ')' : ''),
+        amount_in: amt,
+        amount_out: 0,
+        source: 'receivable',
+        sale_id: sale.id,
+        receivable_payment_id: rows[0].id
+      }])
+    });
+    if(!lr.ok) showToast('Na-save ang bayad pero hindi na-post sa Ledger. Pakisabi sa Admin.', true);
+  }
+  return rows[0];
+}
+
+// Admin-only: voids one payment and its Ledger entry; the balance goes back up.
+async function voidReceivablePayment(payId, reason){
+  if(!isAdmin()) throw new Error('Admin lang ang puwedeng mag-void.');
+  await patchRows(`receivable_payments?id=eq.${payId}&voided=is.false`, voidStamp(reason), true);
+  if(state.ledgerReady) await patchRows(`ledger_entries?receivable_payment_id=eq.${payId}&voided=is.false`, voidStamp(reason));
+  await fetchReceivables();
+  if(state.ledgerReady) await fetchLedger();
+  showToast('Bayad na-void. Bumalik ang balance ng utang.');
+  return true;
+}
+
+/* ----- Sell tab: Utang popup ----- */
+function openUtangPrompt(){
+  if(blockViewer()) return;
+  if(!state.recvReady){
+    showToast(isAdmin() ? 'I-run muna ang "Utang" SQL sa Settings tab.' : 'Hindi pa naka-set up ang Utang. Sabihan ang Admin.', true);
+    return;
+  }
+  if(!state.cart.length || cartTotal() <= 0) return;
+  const m = state.members.find(x => x.id === state.saleMemberId);
+  state.utangPrompt = { name: m ? m.full_name : '', down: '', remarks: '', focus: true };
+  render();
+}
+async function confirmUtangPrompt(){
+  const u = state.utangPrompt;
+  if(!u || state.checkingOut) return;
+  const name = (u.name || '').trim();
+  const total = cartTotal();
+  const down = Math.round((Number(u.down) || 0) * 100) / 100;
+  if(name.length < 2){ showToast('Ilagay ang pangalan ng may utang.', true); return; }
+  if(down < 0 || down > total){ showToast('Hindi puwedeng higit sa total ang paunang bayad.', true); return; }
+  const recv = { name, remarks: (u.remarks || '').trim(), down };
+  state.utangPrompt = null;
+  await checkout(recv);
+}
+function utangModalMarkup(){
+  const u = state.utangPrompt;
+  if(!u) return '';
+  const names = state.members.map(m => `<option value="${escapeHtml(m.full_name)}"></option>`).join('');
+  return `
+  <div class="free-scrim" id="ut-scrim"></div>
+  <div class="free-modal" role="dialog" aria-modal="true" aria-label="Utang">
+    <h2>\uD83D\uDCD2 Utang (bayad later)</h2>
+    <div class="setup-note" style="margin-bottom:12px;">Total: <b>${money(cartTotal())}</b>. Kukunin na ang items at mababawasan ang stock, pero walang papasok sa Ledger hanggang may bayad.</div>
+    <div class="field"><label>Pangalan ng may utang (kailangan)</label><input id="ut-name" list="ut-names" placeholder="hal. Ate Tess" value="${escapeHtml(u.name)}" autocomplete="off"><datalist id="ut-names">${names}</datalist></div>
+    <div class="field"><label>Paunang bayad (optional)</label><input id="ut-down" type="number" step="0.01" inputmode="decimal" placeholder="0.00" value="${escapeHtml(u.down)}"></div>
+    <div class="field"><label>Remarks (optional)</label><input id="ut-remarks" placeholder="hal. babayaran sa Biyernes" value="${escapeHtml(u.remarks)}" autocomplete="off"></div>
+    <div style="display:flex; gap:8px; margin-top:14px;">
+      <button class="primary" id="ut-save" style="flex:1; margin-top:0;">I-save ang utang</button>
+      <button class="ghost" id="ut-cancel" style="flex:1;">Cancel</button>
+    </div>
+  </div>`;
+}
+
+/* ----- Utang tab ----- */
+function openRecvPay(saleId, key){
+  if(blockViewer()) return;
+  const p = { saleId: saleId || null, key: key || '', amount: '', remarks: '', busy: false, focus: true };
+  const t = recvPayTarget(p);
+  if(!(t.balance > 0)) return;
+  p.amount = String(t.balance);
+  state.recvPayPrompt = p;
+  render();
+}
+// who and what a Bayad popup is paying: one sale, or every open sale of a customer (oldest first)
+function recvPayTarget(p){
+  if(p.saleId){
+    const s = state.recvSales.find(x => x.id === p.saleId);
+    return s ? { name: s.buyer_name || '', balance: recvBalance(s), sales: [s] } : { name: '', balance: 0, sales: [] };
+  }
+  const g = recvGroups().find(x => x.key === p.key);
+  if(!g) return { name: '', balance: 0, sales: [] };
+  return { name: g.name, balance: g.balance, sales: g.sales.filter(s => recvBalance(s) > 0.004) };
+}
+async function confirmRecvPay(){
+  const p = state.recvPayPrompt;
+  if(!p || p.busy) return;
+  const t = recvPayTarget(p);
+  const amt = Math.round((Number(p.amount) || 0) * 100) / 100;
+  if(!(amt > 0)){ showToast('Ilagay ang halagang binayad.', true); return; }
+  if(amt > t.balance + 0.004){ showToast('Higit sa balance (' + money(t.balance) + ') ang halaga.', true); return; }
+  p.busy = true; render();
+  try{
+    let left = amt;
+    for(const s of t.sales){
+      if(left <= 0.004) break;
+      const part = Math.min(left, recvBalance(s));
+      if(part <= 0) continue;
+      await addReceivablePayment(s, part, (p.remarks || '').trim());
+      left = Math.round((left - part) * 100) / 100;
+    }
+    state.recvPayPrompt = null;
+    await fetchReceivables();
+    showToast('Bayad na-record: ' + money(amt));
+  }catch(e){
+    showToast('Hindi na-save ang bayad: ' + e.message, true);
+    if(state.recvPayPrompt) state.recvPayPrompt.busy = false;
+    await fetchReceivables();
+  }
+}
+function recvPayModalMarkup(){
+  const p = state.recvPayPrompt;
+  if(!p) return '';
+  const t = recvPayTarget(p);
+  return `
+  <div class="free-scrim" id="rp-scrim"></div>
+  <div class="free-modal" role="dialog" aria-modal="true" aria-label="Bayad">
+    <h2>\uD83D\uDCB5 Bayad ng utang</h2>
+    <div class="setup-note" style="margin-bottom:12px;"><b>${escapeHtml(t.name)}</b> \u2014 balance ${money(t.balance)}${p.saleId ? '' : '. Unahin ang pinakaluma.'}</div>
+    <div class="field"><label>Halagang binayad</label><input id="rp-amount" type="number" step="0.01" inputmode="decimal" value="${escapeHtml(p.amount)}"></div>
+    <div class="field"><label>Remarks (optional)</label><input id="rp-remarks" placeholder="hal. GCash, cash, hulog #2" value="${escapeHtml(p.remarks)}" autocomplete="off"></div>
+    <div style="display:flex; gap:8px; margin-top:14px;">
+      <button class="primary" id="rp-save" style="flex:1; margin-top:0;" ${p.busy ? 'disabled' : ''}>${p.busy ? 'Saving...' : 'I-save ang bayad'}</button>
+      <button class="ghost" id="rp-cancel" style="flex:1;" ${p.busy ? 'disabled' : ''}>Cancel</button>
+    </div>
+  </div>`;
+}
+function recvModalsMarkup(){
+  return utangModalMarkup() + recvPayModalMarkup();
+}
+
+function renderReceivables(){
+  if(!state.recvReady){
+    return '<div class="panel"><h2>Utang (Receivables)</h2><div class="setup-note">' + (isAdmin()
+      ? 'I-run muna ang <b>Utang (Receivables)</b> SQL sa Settings tab (isang beses lang), tapos i-refresh ang page.'
+      : 'Hindi pa naka-set up ang Utang. Sabihan ang Admin.') + '</div></div>';
+  }
+  const all = recvGroups();
+  const totalBal = Math.round(all.reduce((t, g) => t + g.balance, 0) * 100) / 100;
+  const openN = all.filter(g => g.balance > 0.004).length;
+  const groups = (state.recvFilter === 'all' ? all.slice() : all.filter(g => g.balance > 0.004))
+    .sort((a, b) => (b.balance - a.balance) || a.name.localeCompare(b.name));
+  const canVoid = isAdmin() && state.voidCol;
+  const cards = groups.map(g => {
+    const sales = g.sales.slice().sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+    const rows = sales.map(s => {
+      const bal = recvBalance(s), paid = recvPaid(s);
+      const pays = (s.receivable_payments || []).slice().sort((a, b) => new Date(a.created_at) - new Date(b.created_at)).map(p => `
+        <div class="items" ${p.voided ? 'style="text-decoration:line-through; opacity:0.65;"' : ''}>\u2022 ${escapeHtml(new Date(p.created_at).toLocaleString())} \u00B7 ${money(p.amount)}${p.remarks ? ' \u00B7 ' + escapeHtml(p.remarks) : ''}${p.voided ? ' <span class="tag void">VOIDED</span>' : ''}</div>
+        ${p.voided ? voidNoteHtml(p) : (canVoid ? `<button class="ghost void-btn" data-void-recvpay="${p.id}" data-void-label="${escapeHtml('Bayad ' + money(p.amount) + ' \u00B7 ' + g.name)}">Void bayad</button>` : '')}`).join('');
+      const itemsStr = (s.sale_items || []).map(saleItemLabel).join(', ');
+      return `
+      <div class="sale-row">
+        <div class="head"><span>${escapeHtml(new Date(s.created_at).toLocaleString())}</span><span class="amt mono">${bal > 0 ? money(bal) : '<span class="tag closed">Bayad na</span>'}</span></div>
+        <div class="items">${itemsStr}</div>
+        <div class="items">Total ${money(s.total)} \u00B7 Nabayaran ${money(paid)}${s.receivable_remarks ? ' \u00B7 ' + escapeHtml(s.receivable_remarks) : ''}</div>
+        ${pays}
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          ${bal > 0 ? `<button class="ghost" data-recv-pay-sale="${s.id}" style="margin-top:8px; padding:6px 12px;">Bayad (order na ito)</button>` : ''}
+          ${canVoid ? `<button class="ghost void-btn" data-void-recv-sale="${s.id}" data-void-label="${escapeHtml(new Date(s.created_at).toLocaleString() + ' \u00B7 ' + g.name + ' \u00B7 ' + money(s.total))}">Void utang</button>` : ''}
+        </div>
+      </div>`;
+    }).join('');
+    return `
+    <div class="recv-card" style="border:1px solid var(--line); border-radius:var(--radius); padding:12px; margin-bottom:12px;">
+      <div class="head" style="display:flex; justify-content:space-between; gap:10px; align-items:baseline;">
+        <span><b>${escapeHtml(g.name)}</b></span>
+        <span class="amt mono" style="color:${g.balance > 0 ? 'var(--gold)' : 'var(--green)'};">${money(g.balance)}</span>
+      </div>
+      <div class="items" style="margin-bottom:6px;">Kabuuang utang ${money(g.total)} \u00B7 Nabayaran ${money(g.paid)}</div>
+      ${g.balance > 0 ? `<button class="primary" data-recv-pay-cust="${escapeHtml(g.key)}" style="margin:0 0 8px;">Bayad ni ${escapeHtml(g.name)}</button>` : ''}
+      ${rows}
+    </div>`;
+  }).join('') || '<div class="empty">' + (state.recvFilter === 'all' ? 'Wala pang utang.' : 'Walang may balance. \uD83D\uDC4D') + '</div>';
+
+  const fbtn = (v, label) => `<button class="ghost" data-recv-filter="${v}" style="padding:7px 12px;${state.recvFilter === v ? ' border-color:var(--gold); color:var(--gold);' : ''}">${label}</button>`;
+  return `<div class="panel">
+    <h2>Utang (Receivables)</h2>
+    <div class="rpt-stats">
+      <div class="rpt-stat"><div class="lbl">Kabuuang balance</div><div class="val mono">${money(totalBal)}</div></div>
+      <div class="rpt-stat"><div class="lbl">May utang pa</div><div class="val mono">${openN}</div></div>
+    </div>
+    <div style="display:flex; gap:8px; margin-bottom:10px; flex-wrap:wrap;">${fbtn('open', 'May balance')}${fbtn('all', 'Lahat')}</div>
+    <div class="field"><input id="in-recv-search" placeholder="Hanapin ang pangalan o product..."></div>
+    ${state.recvLoading ? '<div class="empty">Loading...</div>' : cards}
+  </div>`;
+}
+
+function wireReceivables(app){
+  const ub = document.getElementById('btn-utang');
+  if(ub) ub.addEventListener('click', openUtangPrompt);
+
+  const u = state.utangPrompt;
+  if(u){
+    const bind = (id, key) => { const e = document.getElementById(id); if(e) e.addEventListener('input', () => { u[key] = e.value; }); return e; };
+    const nm = bind('ut-name', 'name'); bind('ut-down', 'down'); const rm = bind('ut-remarks', 'remarks');
+    if(rm) rm.addEventListener('keydown', ev => { if(ev.key === 'Enter') confirmUtangPrompt(); });
+    if(u.focus && nm){ u.focus = false; nm.focus(); }
+    const sv = document.getElementById('ut-save'); if(sv) sv.addEventListener('click', confirmUtangPrompt);
+    const cx = document.getElementById('ut-cancel'); if(cx) cx.addEventListener('click', () => { state.utangPrompt = null; render(); });
+    const sc = document.getElementById('ut-scrim'); if(sc) sc.addEventListener('click', () => { state.utangPrompt = null; render(); });
+  }
+
+  const p = state.recvPayPrompt;
+  if(p){
+    const am = document.getElementById('rp-amount');
+    if(am){
+      am.addEventListener('input', () => { p.amount = am.value; });
+      am.addEventListener('keydown', ev => { if(ev.key === 'Enter') confirmRecvPay(); });
+      if(p.focus){ p.focus = false; am.focus(); am.select(); }
+    }
+    const rm = document.getElementById('rp-remarks');
+    if(rm){
+      rm.addEventListener('input', () => { p.remarks = rm.value; });
+      rm.addEventListener('keydown', ev => { if(ev.key === 'Enter') confirmRecvPay(); });
+    }
+    const sv = document.getElementById('rp-save'); if(sv) sv.addEventListener('click', confirmRecvPay);
+    const cx = document.getElementById('rp-cancel'); if(cx) cx.addEventListener('click', () => { if(!p.busy){ state.recvPayPrompt = null; render(); } });
+    const sc = document.getElementById('rp-scrim'); if(sc) sc.addEventListener('click', () => { if(!p.busy){ state.recvPayPrompt = null; render(); } });
+  }
+
+  app.querySelectorAll('[data-recv-pay-sale]').forEach(b => b.addEventListener('click', () => openRecvPay(b.dataset.recvPaySale, null)));
+  app.querySelectorAll('[data-recv-pay-cust]').forEach(b => b.addEventListener('click', () => openRecvPay(null, b.dataset.recvPayCust)));
+  app.querySelectorAll('[data-recv-filter]').forEach(b => b.addEventListener('click', () => { state.recvFilter = b.dataset.recvFilter; render(); }));
+  app.querySelectorAll('[data-void-recv-sale]').forEach(b => b.addEventListener('click', () => openVoidPrompt('sale', b.dataset.voidRecvSale, b.dataset.voidLabel || 'Utang')));
+  app.querySelectorAll('[data-void-recvpay]').forEach(b => b.addEventListener('click', () => openVoidPrompt('recv-payment', b.dataset.voidRecvpay, b.dataset.voidLabel || 'Bayad')));
+
+  const rs = document.getElementById('in-recv-search');
+  if(rs){
+    rs.addEventListener('input', () => {
+      const q = rs.value.trim().toLowerCase();
+      app.querySelectorAll('.recv-card').forEach(c => { c.style.display = (!q || c.textContent.toLowerCase().includes(q)) ? '' : 'none'; });
+    });
+  }
+}
+
+
 function freeModalMarkup(){
   const fp = state.freePrompt;
   if(!fp) return '';
@@ -4307,6 +4702,8 @@ function render(){
     body = renderSaleItems();
   } else if(state.tab === 'consign'){
     body = renderConsign();
+  } else if(state.tab === 'receivables'){
+    body = renderReceivables();
   } else if(state.tab === 'ledger'){
     body = renderLedger();
   } else if(state.tab === 'supplies'){
@@ -4327,6 +4724,7 @@ function render(){
       (isViewer() ? '' : '<button data-tab="pos" class="' + active('pos') + '">Sell</button>') +
       '<button data-tab="products" class="' + active('products') + '">Products</button>' +
       '<button data-tab="consign" class="' + active('consign') + '">Consign</button>' +
+      (isViewer() ? '' : '<button data-tab="receivables" class="' + active('receivables') + '">Utang</button>') +
       // discount is a fixed peso amount per product, set in the Products tab
       '<button data-tab="members" class="' + active('members') + '">Members</button>' +
       '<div class="nav-group' + (state.reportMenuOpen ? ' open' : '') + '">' +
@@ -4354,6 +4752,7 @@ function render(){
     scrim +
     body +
     freeModalMarkup() +
+    recvModalsMarkup() +
     voidModalMarkup() +
     pwModalMarkup() +
     (state.toast ? '<div class="toast ' + (state.toast.isErr ? 'err' : '') + '">' + escapeHtml(state.toast.msg) + '</div>' : '');
@@ -4539,7 +4938,8 @@ function render(){
   app.querySelectorAll('[data-dec]').forEach(b=> b.addEventListener('click', ()=> changeQty(b.dataset.dec, -1)));
 
   const checkoutBtn = document.getElementById('btn-checkout');
-  if(checkoutBtn) checkoutBtn.addEventListener('click', checkout);
+  if(checkoutBtn) checkoutBtn.addEventListener('click', ()=> checkout());
+  wireReceivables(app);
 
   const posSearchInput = document.getElementById('in-pos-search');
   if(posSearchInput){
@@ -4979,6 +5379,8 @@ let lastBackAt = 0;
 function pushGuard(){ try{ history.pushState({ccfaco:1}, ''); }catch(e){} }
 function closeTopOverlay(){
   if(state.voidPrompt){ if(!state.voidPrompt.busy){ state.voidPrompt = null; render(); } return true; }
+  if(state.utangPrompt){ state.utangPrompt = null; render(); return true; }
+  if(state.recvPayPrompt){ if(!state.recvPayPrompt.busy){ state.recvPayPrompt = null; render(); } return true; }
   if(state.pwPrompt){ state.pwPrompt = null; render(); return true; }
   if(state.freePrompt){ state.freePrompt = null; render(); return true; }
   if(state.themeOpen){ setThemeOpen(false); return true; }
