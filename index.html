@@ -530,6 +530,7 @@ const state = {
   discountCol: false,   // true once the products table has a discount column (see Settings SQL)
   saleMemberId: '',      // id of the member picked for THIS sale in the Sell tab; '' = walk-in, no discount
   consignMemberId: '',   // member picked when sending a consignment out; discount applies to it at settle time
+  consignMemberNameCol: false, // true once consignments has a member_name column (so everyone can see the member tag)
   consignMemberCol: false, // true once the consignments table has a member_id column (see Settings SQL)
   appUsers: [],           // list of profiles rows, admin-only, for the Manage users section in Settings
   userBusy: false,        // true while adding a new user
@@ -1186,6 +1187,21 @@ async function checkConsignMemberColumn(){
   }catch(e){
     state.consignMemberCol = false;
   }
+  try{
+    const r2 = await fetch(`${state.supaUrl}/rest/v1/consignments?select=member_name&limit=1`, { headers: supaHeaders() });
+    state.consignMemberNameCol = r2.ok;
+  }catch(e){
+    state.consignMemberNameCol = false;
+  }
+}
+
+// Name of the Member a consignment is tagged to. Uses the saved member_name so Regular users
+// (who cannot read the Members list) still see the tag.
+function consignMemberOf(c){
+  if(!c || !c.member_id) return null;
+  const m = state.members.find(x => x.id === c.member_id);
+  if(m) return m;
+  return { id: c.member_id, full_name: c.member_name || 'Member' };
 }
 
 // Detect once whether the ledger_entries table exists (see Settings SQL)
@@ -2102,7 +2118,11 @@ async function sendConsignment(){
   state.busy = true; render();
   try{
     const consignRow = { consignee, note: state.consignNote.trim() || null, status: 'open' };
-    if(state.consignMemberCol && state.consignMemberId) consignRow.member_id = state.consignMemberId;
+    if(state.consignMemberCol && state.consignMemberId){
+      consignRow.member_id = state.consignMemberId;
+      const tagged = state.members.find(x => x.id === state.consignMemberId);
+      if(state.consignMemberNameCol && tagged) consignRow.member_name = tagged.full_name;
+    }
     const cRes = await fetch(`${state.supaUrl}/rest/v1/consignments`, {
       method:'POST', headers: supaHeaders(),
       body: JSON.stringify([consignRow])
@@ -3061,7 +3081,9 @@ create policy "member can read own contributions" on public.member_contributions
       <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
         <h2>Consignment member discount</h2>
         <div class="setup-note">Gusto mo bang may discount din pag-settle ng consignment, kapag Member ang kumuha? I-run ito nang isang beses (kailangan muna gumagana ang Members at Product discounts sa itaas). Kapag tapos na, lalabas ang Member dropdown sa "Send items out", at awtomatikong ibabawas ang discount sa presyo pag na-settle na kung Member ang naka-tag doon.</div>
-        <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">alter table consignments add column if not exists member_id uuid references members(id);</code>
+        <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">alter table consignments add column if not exists member_id uuid references members(id);
+alter table consignments add column if not exists member_name text;
+update consignments c set member_name = m.full_name from members m where m.id = c.member_id and c.member_name is null;</code>
       </div>
 
       <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
@@ -4182,7 +4204,7 @@ function renderConsign(){
     // search filter: consignee, product names, member name, note
     if(state.consignSearch.trim()){
       const cq = state.consignSearch.trim().toLowerCase();
-      const linkedForSearch = c.member_id ? state.members.find(m=>m.id===c.member_id) : null;
+      const linkedForSearch = consignMemberOf(c);
       const hay = `${c.consignee||''} ${c.note||''} ${linkedForSearch ? linkedForSearch.full_name : ''} ${items.map(i=>i.product_name||'').join(' ')}`.toLowerCase();
       if(!hay.includes(cq)) return '';
     }
@@ -4190,7 +4212,7 @@ function renderConsign(){
     const sold = items.reduce((s,i)=> s + (i.qty_sold||0), 0);
     const ret = items.reduce((s,i)=> s + (i.qty_returned||0), 0);
     const soldValue = items.reduce((s,i)=> s + consignUnitPrice(i, c)*(i.qty_sold||0), 0);
-    const linkedMember = c.member_id ? state.members.find(m=>m.id===c.member_id) : null;
+    const linkedMember = consignMemberOf(c);
 
     const itemRows = items.map(i => {
       const disc = linkedMember ? productDiscount(i.product_id) : 0;
