@@ -109,6 +109,7 @@
     transition: background .15s ease, color .15s ease, border-color .15s ease, transform .1s ease;
   }
   nav.tabs button:hover{ color: var(--ink); border-color: var(--gold-dim); background: var(--bg-panel-2); transform: translateY(-1px); }
+  nav.tabs button:disabled, nav.tabs button:disabled:hover{ opacity:.4; cursor:not-allowed; transform:none; color: var(--ink-dim); border-color: transparent; background: transparent; }
   nav.tabs button.active{
     color: var(--on-accent, #14261F);
     background: var(--gold);
@@ -660,8 +661,8 @@ async function loadProfile(){
   if(!res.ok) throw new Error('Could not load your role profile. Run the role setup SQL in your Supabase SQL Editor first.');
   const rows = await res.json();
   const profile = rows[0];
-  if(!profile || (profile.role !== 'admin' && profile.role !== 'cashier' && profile.role !== 'viewer')){
-    throw new Error('No valid role is assigned to this account. Add this account to the profiles table as admin, cashier, or viewer in your Supabase SQL Editor.');
+  if(!profile || (profile.role !== 'admin' && profile.role !== 'cashier' && profile.role !== 'viewer' && profile.role !== 'guest')){
+    throw new Error('No valid role is assigned to this account. Add this account to the profiles table as admin, cashier, viewer, or guest in your Supabase SQL Editor.');
   }
   state.role = profile.role;
 }
@@ -764,8 +765,11 @@ function logout(){
 }
 
 function isAdmin(){ return state.role === 'admin'; }
-function isViewer(){ return state.role === 'viewer'; }
-function roleLabel(){ return isAdmin() ? 'Admin' : (isViewer() ? 'Regular' : 'Cashier'); }
+// Guest = view-only like a Regular user, but only the Report tabs (Daily, Monthly, Expenses, History) open.
+const GUEST_TABS = ['items', 'report', 'expenses', 'history'];
+function isGuest(){ return state.role === 'guest'; }
+function isViewer(){ return state.role === 'viewer' || state.role === 'guest'; }
+function roleLabel(){ return isAdmin() ? 'Admin' : (isGuest() ? 'Guest' : (isViewer() ? 'Regular' : 'Cashier')); }
 function blockViewer(){
   if(isViewer()){ showToast('Regular users have view-only access.', true); return true; }
   return false;
@@ -863,6 +867,10 @@ function loadSuppliesForCurrentTab(){
   return suppliesDataPromise;
 }
 function switchTab(tab, fromBack){
+  if(isGuest() && GUEST_TABS.indexOf(tab) < 0){
+    showToast('Guest: Report lang ang bukas.', true);
+    return;
+  }
   if(tab === 'settings' && !isAdmin()){
     showToast('Settings is available to Admin only.', true);
     return;
@@ -2677,7 +2685,7 @@ function renderMembers(){
 }
 
 /* ---------- Users (admin-only) ---------- */
-function roleDisplay(role){ return role === 'admin' ? 'Admin' : (role === 'viewer' ? 'Regular' : 'Cashier'); }
+function roleDisplay(role){ return role === 'admin' ? 'Admin' : (role === 'viewer' ? 'Regular' : (role === 'guest' ? 'Guest' : 'Cashier')); }
 
 async function fetchAppUsers(){
   if(!state.connected || !isAdmin()) return;
@@ -2886,6 +2894,7 @@ function userRowHtml(u){
       '<option value="admin"' + (u.role==='admin'?' selected':'') + '>Admin</option>' +
       '<option value="cashier"' + (u.role==='cashier'?' selected':'') + '>Cashier</option>' +
       '<option value="viewer"' + (u.role==='viewer'?' selected':'') + '>Regular</option>' +
+      '<option value="guest"' + (u.role==='guest'?' selected':'') + '>Guest (Report lang)</option>' +
     '</select>' +
     (isMe ? '' : '<button class="icon-btn" data-remove-user="' + u.user_id + '" title="Delete user">\u2715</button>') +
     '</div></div>';
@@ -2955,6 +2964,7 @@ where u.id = p.user_id and (p.email is null or p.email = '');</code>
         <select id="nu-role" class="field-input">
           <option value="cashier"${state.userDraft.role==='cashier'?' selected':''}>Cashier</option>
           <option value="viewer"${state.userDraft.role==='viewer'?' selected':''}>Regular (view only)</option>
+          <option value="guest"${state.userDraft.role==='guest'?' selected':''}>Guest (Report lang)</option>
           <option value="admin"${state.userDraft.role==='admin'?' selected':''}>Admin</option>
         </select>
       </div>
@@ -2974,13 +2984,13 @@ where u.id = p.user_id and (p.email is null or p.email = '');</code>
         <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">create table if not exists profiles (
   user_id uuid primary key references auth.users(id) on delete cascade,
   full_name text,
-  role text not null default 'cashier' check (role in ('admin','cashier','viewer')) ,
+  role text not null default 'cashier' check (role in ('admin','cashier','viewer','guest')) ,
   created_at timestamptz default now()
 );
 
 alter table profiles enable row level security;
 alter table public.profiles drop constraint if exists profiles_role_check;
-alter table public.profiles add constraint profiles_role_check check (role in ('admin','cashier','viewer'));
+alter table public.profiles add constraint profiles_role_check check (role in ('admin','cashier','viewer','guest'));
 
 drop policy if exists "users can read own profile" on profiles;
 create policy "users can read own profile" on profiles for select to authenticated using (auth.uid() = user_id);
@@ -4730,6 +4740,7 @@ function freeModalMarkup(){
 
 function render(){
   const app = document.getElementById('app');
+  if(state.connected && isGuest() && GUEST_TABS.indexOf(state.tab) < 0){ state.tab = 'report'; setTimeout(fetchReport, 0); }
   if(state.connected && state.tab === 'settings' && !isAdmin()) state.tab = 'pos';
   if(state.connected && state.tab === 'report' && !canSeeReport()) state.tab = 'pos';
   let body;
@@ -4766,16 +4777,17 @@ function render(){
   }
 
   const active = tab => state.tab === tab ? 'active' : '';
+  const gOff = tab => (isGuest() && GUEST_TABS.indexOf(tab) < 0) ? ' disabled aria-disabled="true" title="Hindi bukas sa Guest"' : '';
   const mobileUser = state.connected ?
     '<div class="m-userbar"><span class="role-badge">' + escapeHtml(roleLabel()) + '</span><span>' + escapeHtml(state.user && state.user.email ? state.user.email : 'Signed in') + '</span><button class="ghost" data-chpw="1" style="padding:5px 9px;">\uD83D\uDD11 Password</button><button class="ghost" id="btn-logout-m" style="padding:5px 9px;">Sign out</button></div>' : '';
   const nav = state.connected ?
     '<nav class="tabs' + (state.menuOpen ? ' open' : '') + '">' +
-      (isViewer() ? '' : '<button data-tab="pos" class="' + active('pos') + '">Sell</button>') +
-      '<button data-tab="products" class="' + active('products') + '">Products</button>' +
-      '<button data-tab="consign" class="' + active('consign') + '">Consign</button>' +
-      '<button data-tab="receivables" class="' + active('receivables') + '">Utang</button>' +
+      ((isViewer() && !isGuest()) ? '' : '<button data-tab="pos" class="' + active('pos') + '"' + gOff('pos') + '>Sell</button>') +
+      '<button data-tab="products" class="' + active('products') + '"' + gOff('products') + '>Products</button>' +
+      '<button data-tab="consign" class="' + active('consign') + '"' + gOff('consign') + '>Consign</button>' +
+      '<button data-tab="receivables" class="' + active('receivables') + '"' + gOff('receivables') + '>Utang</button>' +
       // discount is a fixed peso amount per product, set in the Products tab
-      '<button data-tab="members" class="' + active('members') + '">Members</button>' +
+      '<button data-tab="members" class="' + active('members') + '"' + gOff('members') + '>Members</button>' +
       '<div class="nav-group' + (state.reportMenuOpen ? ' open' : '') + '">' +
         '<button data-group="report" class="' + (['items','report','expenses','history'].indexOf(state.tab) >= 0 ? 'active' : '') + '" aria-haspopup="true" aria-expanded="' + (state.reportMenuOpen ? 'true' : 'false') + '">Report &#9662;</button>' +
         '<div class="nav-sub">' +
@@ -4785,9 +4797,9 @@ function render(){
           '<button data-tab="history" class="' + active('history') + '">History</button>' +
         '</div>' +
       '</div>' +
-      '<button data-tab="ledger" class="' + active('ledger') + '">Ledger</button>' +
-      '<button data-tab="supplies" class="' + active('supplies') + '">Supplies</button>' +
-      '<button data-tab="bank" class="' + active('bank') + '">Bank</button>' +
+      '<button data-tab="ledger" class="' + active('ledger') + '"' + gOff('ledger') + '>Ledger</button>' +
+      '<button data-tab="supplies" class="' + active('supplies') + '"' + gOff('supplies') + '>Supplies</button>' +
+      '<button data-tab="bank" class="' + active('bank') + '"' + gOff('bank') + '>Bank</button>' +
       (isAdmin() ? '<button data-tab="settings" class="' + active('settings') + '">Settings</button>' : '') +
       mobileUser +
     '</nav>' : '';
