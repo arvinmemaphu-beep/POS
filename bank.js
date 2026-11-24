@@ -69,10 +69,10 @@ async function loadBankData(){
 
 /* ----- Admin: Bank tab ----- */
 function renderBank(){
-  if(!isAdmin()) return '<div class="panel"><h2>Bank</h2><div class="setup-note">Admin lang ang may access dito.</div></div>';
   if(!state.bankReady){
     return '<div class="panel"><h2>Bank</h2><div class="setup-note">' + escapeHtml(state.bankError || 'Loading...') + '</div></div>';
   }
+  if(!isAdmin()) return renderBankReadOnly();
   const total = state.bankAccounts.reduce((s, a) => s + (Number(a.amount) || 0), 0);
   const cards = state.bankAccounts.map(a => {
     const sel = a.id === state.bankSel;
@@ -146,9 +146,10 @@ function renderBank(){
     '</div></div>';
 }
 
-/* ----- Members: read-only card (description + amount) ----- */
-function bankMemberCardHtml(){
-  if(!state.bankReady || !state.bankAccounts.length) return '';
+/* ----- Members / viewers: read-only Bank tab (description + amount, walang History) ----- */
+function renderBankReadOnly(){
+  if(!state.bankAccounts.length) return '<div class="panel"><h2>Bank</h2><div class="setup-note">Wala pang naka-set na account.</div></div>';
+  const total = state.bankAccounts.reduce((s, a) => s + (Number(a.amount) || 0), 0);
   const rows = state.bankAccounts.map(a =>
     '<div class="product-row" style="display:block; cursor:default;"><div style="display:flex; justify-content:space-between; gap:10px;">' +
       '<div><div class="name">' + escapeHtml(BANK_LABEL[a.purpose] || a.purpose) + '</div>' +
@@ -156,7 +157,8 @@ function bankMemberCardHtml(){
       '<div class="price">' + money(a.amount) + '</div>' +
     '</div></div>'
   ).join('');
-  return '<div class="panel" style="margin-top:20px;"><h2>Mga Account ng Coop</h2><div class="product-list">' + rows + '</div></div>';
+  return '<div class="panel"><h2>Bank accounts ng Coop</h2><div class="product-list">' + rows + '</div>' +
+    '<div style="display:flex; justify-content:space-between; margin-top:12px; font-weight:700; font-size:17px;"><span>Kabuuan</span><span class="price">' + money(total) + '</span></div></div>';
 }
 
 /* ----- events ----- */
@@ -180,8 +182,8 @@ async function bankRpc(fn, body, okMsg){
 function bankSubmitAdd(sign){
   const p = state.bankPanel;
   if(!p) return;
-  const amt = bankNum(p.amount);
-  if(!(amt > 0)){ showToast('Ilagay ang halaga (mas malaki sa 0).', true); return; }
+  const amt = Math.round(bankNum(p.amount) * 100) / 100;
+  if(!(amt > 0) || amt > 999999999999){ showToast('Ilagay ang tamang halaga (mas malaki sa 0).', true); return; }
   if(!(p.remarks || '').trim()){ showToast('Kailangan ang remarks.', true); return; }
   bankRpc('bank_add', { p_account: p.id, p_change: sign * amt, p_remarks: p.remarks.trim() }, sign > 0 ? 'Naidagdag.' : 'Nabawas.');
 }
@@ -189,8 +191,8 @@ function bankSubmitAdd(sign){
 function bankSubmitSet(){
   const p = state.bankPanel;
   if(!p) return;
-  const amt = bankNum(p.amount);
-  if(p.amount === '' || !isFinite(amt) || amt < 0){ showToast('Ilagay ang tamang balance (0 pataas).', true); return; }
+  const amt = Math.round(bankNum(p.amount) * 100) / 100;
+  if(p.amount === '' || !isFinite(amt) || amt < 0 || amt > 999999999999){ showToast('Ilagay ang tamang balance (0 pataas).', true); return; }
   if(!(p.remarks || '').trim()){ showToast('Kailangan ang remarks.', true); return; }
   bankRpc('bank_set_amount', { p_account: p.id, p_new: amt, p_remarks: p.remarks.trim() }, 'Naitakda ang balance.');
 }

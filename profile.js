@@ -1,7 +1,7 @@
 /* ---------- Member profile (contributions + fund balances) ----------
    - A "Regular" login account can be linked to ONE member (Members tab -> tap a member -> "Login account").
    - When that account opens the Members tab it sees ITS OWN profile instead of the directory:
-     name, contact, Change password, fund balances (Share Capital, Statutory Fund, ...) and every contribution.
+     name, contact, Change password, fund balances (Share Capital, Savings, ...) and every contribution.
    - Only the Admin can add / delete contributions and link accounts. Cashier can view.
    - Needs the "Member profile" SQL in Settings (members.user_id + member_contributions + policies).
    Loaded on demand by index.html (same pattern as supplies.js). */
@@ -21,7 +21,7 @@ Object.assign(state, {
   mpDraft: { date: '', fund: 'Share Capital', kind: 'in', amount: '', shares: '', note: '' }
 });
 
-const MP_DEFAULT_FUNDS = ['Share Capital', 'Statutory Fund', 'Savings'];
+const MP_DEFAULT_FUNDS = ['Share Capital', 'Savings'];
 const MP_SHARE_PAR = 100;   // pesos per share (Excel: 60 shares = 6,000)
 
 function mpFmt(n){
@@ -76,7 +76,7 @@ async function mpLoad(memberId){
   render();
 }
 
-// Per-fund totals. Share Capital and Statutory Fund are always shown first, even at 0.
+// Per-fund totals. Share Capital is always shown first, even at 0.
 function mpBalances(rows){
   const map = {}, shares = {};
   rows.forEach(r => {
@@ -84,8 +84,8 @@ function mpBalances(rows){
     map[f] = (map[f] || 0) + (Number(r.amount) || 0);
     shares[f] = (shares[f] || 0) + (Number(r.shares) || 0);
   });
-  ['Share Capital', 'Statutory Fund'].forEach(f => { if(!(f in map)) map[f] = 0; });
-  const first = ['Share Capital', 'Statutory Fund'];
+  ['Share Capital'].forEach(f => { if(!(f in map)) map[f] = 0; });
+  const first = ['Share Capital'];
   const names = Object.keys(map).sort((a, b) => {
     const ia = first.indexOf(a), ib = first.indexOf(b);
     if(ia !== -1 || ib !== -1) return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);

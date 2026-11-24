@@ -820,7 +820,7 @@ function ensureBankModule(){
 async function loadBankForTab(){
   try{
     await ensureBankModule();
-    if(state.tab === 'bank' || state.tab === 'members') render();
+    if(state.tab === 'bank') render();
     await loadBankData();
   }catch(e){
     showToast('Could not load Bank: ' + (e.message || e), true);
@@ -867,10 +867,6 @@ function switchTab(tab, fromBack){
     showToast('Settings is available to Admin only.', true);
     return;
   }
-  if(tab === 'receivables' && isViewer()){
-    showToast('Utang is available to Admin and Cashier only.', true);
-    return;
-  }
   if(tab === 'report' && !canSeeReport()){
     showToast('The report is available to Admin and Regular users only.', true);
     return;
@@ -891,7 +887,7 @@ function switchTab(tab, fromBack){
   if(tab === 'supplies') loadSuppliesForCurrentTab();
   if(tab === 'report') fetchReport();
   if(tab === 'expenses') fetchExpenses();
-  if(tab === 'members'){ fetchMembers(); loadProfileForMembersTab(); loadBankForTab(); }
+  if(tab === 'members'){ fetchMembers(); loadProfileForMembersTab(); }
   if(tab === 'bank') loadBankForTab();
   if(tab === 'settings') fetchAppUsers();
 }
@@ -2647,7 +2643,7 @@ function renderMembers(){
   }
   if(typeof renderMemberProfileView === 'function'){
     const mine = renderMemberProfileView();   // a Regular account linked to a member sees its own profile
-    if(mine) return mine + (typeof bankMemberCardHtml === 'function' ? bankMemberCardHtml() : '');
+    if(mine) return mine;
   }
   const leftPanel = isViewer() ?
     '<h2>Members</h2><div class="setup-note">Regular access is view-only. Members cannot be added or changed here.</div>' :
@@ -3071,7 +3067,7 @@ create policy "staff can write members" on members for all to authenticated usin
 
       <div style="border-top:1px solid var(--line); margin:18px 0 14px; padding-top:14px;">
         <h2>Member profile (contributions)</h2>
-        <div class="setup-note">I-run nang isang beses sa Supabase SQL Editor. Kailangan muna ang <strong>User access roles</strong> at <strong>Members</strong> SQL sa itaas. Magdadagdag ito ng link ng login account sa member, at ng talaan ng contributions (Share Capital, Statutory Fund, atbp.). Ang Admin lang ang makakapagdagdag/magbubura; ang Regular na account ay makikita lang ang sarili niyang contributions.</div>
+        <div class="setup-note">I-run nang isang beses sa Supabase SQL Editor. Kailangan muna ang <strong>User access roles</strong> at <strong>Members</strong> SQL sa itaas. Magdadagdag ito ng link ng login account sa member, at ng talaan ng contributions (Share Capital, Savings, atbp.). Ang Admin lang ang makakapagdagdag/magbubura; ang Regular na account ay makikita lang ang sarili niyang contributions.</div>
         <code style="display:block; white-space:pre-wrap; padding:10px; margin-top:10px;">alter table public.members add column if not exists user_id uuid references auth.users(id) on delete set null;
 create unique index if not exists members_user_id_key on public.members(user_id) where user_id is not null;
 
@@ -4736,7 +4732,6 @@ function render(){
   const app = document.getElementById('app');
   if(state.connected && state.tab === 'settings' && !isAdmin()) state.tab = 'pos';
   if(state.connected && state.tab === 'report' && !canSeeReport()) state.tab = 'pos';
-  if(state.connected && state.tab === 'bank' && !isAdmin()) state.tab = 'pos';
   let body;
   if(!state.supaUrl || !state.supaKey){
     body = renderSetup();
@@ -4778,7 +4773,7 @@ function render(){
       (isViewer() ? '' : '<button data-tab="pos" class="' + active('pos') + '">Sell</button>') +
       '<button data-tab="products" class="' + active('products') + '">Products</button>' +
       '<button data-tab="consign" class="' + active('consign') + '">Consign</button>' +
-      (isViewer() ? '' : '<button data-tab="receivables" class="' + active('receivables') + '">Utang</button>') +
+      '<button data-tab="receivables" class="' + active('receivables') + '">Utang</button>' +
       // discount is a fixed peso amount per product, set in the Products tab
       '<button data-tab="members" class="' + active('members') + '">Members</button>' +
       '<div class="nav-group' + (state.reportMenuOpen ? ' open' : '') + '">' +
@@ -4792,7 +4787,7 @@ function render(){
       '</div>' +
       '<button data-tab="ledger" class="' + active('ledger') + '">Ledger</button>' +
       '<button data-tab="supplies" class="' + active('supplies') + '">Supplies</button>' +
-      (isAdmin() ? '<button data-tab="bank" class="' + active('bank') + '">Bank</button>' : '') +
+      '<button data-tab="bank" class="' + active('bank') + '">Bank</button>' +
       (isAdmin() ? '<button data-tab="settings" class="' + active('settings') + '">Settings</button>' : '') +
       mobileUser +
     '</nav>' : '';
