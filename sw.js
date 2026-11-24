@@ -5,12 +5,13 @@
 // double-sold while offline.
 // Whenever you ADD a new .js/.css file to the app, list it in SHELL_FILES below
 // and bump the version number in CACHE_NAME.
-const CACHE_NAME = 'ccfaco-pos-shell-v10';
+const CACHE_NAME = 'ccfaco-pos-shell-v11';
 const SHELL_FILES = [
   './index.html',
   './config.js',
   './supplies.js',
   './profile.js',
+  './bank.js',
   './manifest.json',
   './icon-192.png',
   './icon-512.png',

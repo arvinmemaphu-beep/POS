@@ -799,6 +799,34 @@ async function loadProfileForMembersTab(){
   }
 }
 
+let bankModulePromise = null;
+function ensureBankModule(){
+  if(typeof renderBank === 'function' && typeof loadBankData === 'function') return Promise.resolve();
+  if(!bankModulePromise){
+    bankModulePromise = new Promise((resolve, reject)=>{
+      const script = document.createElement('script');
+      script.src = 'bank.js';
+      script.async = true;
+      script.onload = ()=>{
+        if(typeof renderBank === 'function' && typeof bindBank === 'function' && typeof loadBankData === 'function') resolve();
+        else reject(new Error('Bank module did not initialize.'));
+      };
+      script.onerror = ()=>reject(new Error('Could not download bank.js.'));
+      document.head.appendChild(script);
+    }).catch(e=>{ bankModulePromise = null; throw e; });
+  }
+  return bankModulePromise;
+}
+async function loadBankForTab(){
+  try{
+    await ensureBankModule();
+    if(state.tab === 'bank' || state.tab === 'members') render();
+    await loadBankData();
+  }catch(e){
+    showToast('Could not load Bank: ' + (e.message || e), true);
+  }
+}
+
 let suppliesModulePromise = null;
 let suppliesDataPromise = null;
 function ensureSuppliesModule(){
@@ -863,7 +891,8 @@ function switchTab(tab, fromBack){
   if(tab === 'supplies') loadSuppliesForCurrentTab();
   if(tab === 'report') fetchReport();
   if(tab === 'expenses') fetchExpenses();
-  if(tab === 'members'){ fetchMembers(); loadProfileForMembersTab(); }
+  if(tab === 'members'){ fetchMembers(); loadProfileForMembersTab(); loadBankForTab(); }
+  if(tab === 'bank') loadBankForTab();
   if(tab === 'settings') fetchAppUsers();
 }
 
@@ -2618,7 +2647,7 @@ function renderMembers(){
   }
   if(typeof renderMemberProfileView === 'function'){
     const mine = renderMemberProfileView();   // a Regular account linked to a member sees its own profile
-    if(mine) return mine;
+    if(mine) return mine + (typeof bankMemberCardHtml === 'function' ? bankMemberCardHtml() : '');
   }
   const leftPanel = isViewer() ?
     '<h2>Members</h2><div class="setup-note">Regular access is view-only. Members cannot be added or changed here.</div>' :
@@ -4707,6 +4736,7 @@ function render(){
   const app = document.getElementById('app');
   if(state.connected && state.tab === 'settings' && !isAdmin()) state.tab = 'pos';
   if(state.connected && state.tab === 'report' && !canSeeReport()) state.tab = 'pos';
+  if(state.connected && state.tab === 'bank' && !isAdmin()) state.tab = 'pos';
   let body;
   if(!state.supaUrl || !state.supaKey){
     body = renderSetup();
@@ -4730,6 +4760,8 @@ function render(){
     body = renderLedger();
   } else if(state.tab === 'supplies'){
     body = (typeof renderSupplies === 'function') ? renderSupplies() : '<div class="panel"><h2>Supplies</h2><div class="setup-note">' + escapeHtml(state.suppliesModuleError || 'Loading Supplies...') + '</div></div>';
+  } else if(state.tab === 'bank'){
+    body = (typeof renderBank === 'function') ? renderBank() : '<div class="panel"><h2>Bank</h2><div class="setup-note">Loading Bank...</div></div>';
   } else if(state.tab === 'report'){
     body = renderReport();
   } else if(state.tab === 'expenses'){
@@ -4760,6 +4792,7 @@ function render(){
       '</div>' +
       '<button data-tab="ledger" class="' + active('ledger') + '">Ledger</button>' +
       '<button data-tab="supplies" class="' + active('supplies') + '">Supplies</button>' +
+      (isAdmin() ? '<button data-tab="bank" class="' + active('bank') + '">Bank</button>' : '') +
       (isAdmin() ? '<button data-tab="settings" class="' + active('settings') + '">Settings</button>' : '') +
       mobileUser +
     '</nav>' : '';
@@ -5379,6 +5412,7 @@ function render(){
   if(addLedgerBtn) addLedgerBtn.addEventListener('click', addLedgerEntry);
   if(typeof bindSupplies === 'function') bindSupplies(app);
   if(typeof bindMemberProfile === 'function') bindMemberProfile(app);
+  if(typeof bindBank === 'function') bindBank(app);
 }
 
 async function init(){
