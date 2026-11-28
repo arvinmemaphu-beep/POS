@@ -532,6 +532,8 @@ const state = {
   saleMemberId: '',      // id of the member picked for THIS sale in the Sell tab; '' = walk-in, no discount
   consignMemberId: '',   // member picked when sending a consignment out; discount applies to it at settle time
   consignMemberNameCol: false, // true once consignments has a member_name column (so everyone can see the member tag)
+  saleMemberCol: false,   // true once sales has member_id (see sale-member.sql)
+  saleMemberNameCol: false,
   consignMemberCol: false, // true once the consignments table has a member_id column (see Settings SQL)
   appUsers: [],           // list of profiles rows, admin-only, for the Manage users section in Settings
   userBusy: false,        // true while adding a new user
@@ -673,7 +675,7 @@ async function restoreAuth(){
     await fetchCurrentUser();
     await loadProfile();
     const ok = await testConnection();
-    if(ok){ await checkDiscountColumn(); await checkFreeColumn(); await checkConsignMemberColumn(); await checkLedgerReady(); await checkLedgerDepositColumn(); await checkLedgerTransferColumn(); await checkVoidColumn(); await checkMissingReady(); await checkReceivableReady(); await fetchProducts(); await fetchMembers(); }
+    if(ok){ await checkDiscountColumn(); await checkFreeColumn(); await checkConsignMemberColumn(); await checkSaleMemberColumn(); await checkLedgerReady(); await checkLedgerDepositColumn(); await checkLedgerTransferColumn(); await checkVoidColumn(); await checkMissingReady(); await checkReceivableReady(); await fetchProducts(); await fetchMembers(); }
     return ok;
   }catch(e){
     clearSession();
@@ -706,7 +708,7 @@ async function login(email, password){
     if(!await testConnection()) throw new Error('Signed in, but the POS tables could not be reached. Check your Supabase setup.');
     await checkDiscountColumn();
     await checkFreeColumn();
-    await checkConsignMemberColumn();
+    await checkConsignMemberColumn(); await checkSaleMemberColumn();
     await checkLedgerReady();
     await checkLedgerDepositColumn();
     await checkLedgerTransferColumn();
@@ -766,7 +768,7 @@ function logout(){
 
 function isAdmin(){ return state.role === 'admin'; }
 // Guest = view-only like a Regular user, but only the Report tabs (Daily, Monthly, Expenses, History) open.
-const GUEST_TABS = ['items', 'report', 'expenses', 'history'];
+const GUEST_TABS = ['items', 'report', 'expenses', 'history', 'averages'];
 function isGuest(){ return state.role === 'guest'; }
 function isViewer(){ return state.role === 'viewer' || state.role === 'guest'; }
 function roleLabel(){ return isAdmin() ? 'Admin' : (isGuest() ? 'Guest' : (isViewer() ? 'Regular' : 'Cashier')); }
@@ -800,6 +802,42 @@ async function loadProfileForMembersTab(){
     if(typeof loadMemberProfileData === 'function') await loadMemberProfileData();
   }catch(e){
     showToast('Could not load Member profile: ' + (e.message || e), true);
+  }
+}
+
+let averagesModulePromise = null;
+function ensureAveragesModule(){
+  if(typeof renderAverages === 'function' && typeof loadAverages === 'function') return Promise.resolve();
+  if(!averagesModulePromise){
+    averagesModulePromise = new Promise((resolve, reject)=>{
+      const script = document.createElement('script');
+      script.src = 'averages.js';
+      script.async = true;
+      script.onload = ()=>{
+        if(typeof renderAverages === 'function' && typeof bindAverages === 'function' && typeof loadAverages === 'function' && typeof exportReportsToExcel === 'function') resolve();
+        else reject(new Error('Averages module did not initialize.'));
+      };
+      script.onerror = ()=>reject(new Error('Could not download averages.js.'));
+      document.head.appendChild(script);
+    }).catch(e=>{ averagesModulePromise = null; throw e; });
+  }
+  return averagesModulePromise;
+}
+async function loadAveragesForTab(){
+  try{
+    await ensureAveragesModule();
+    if(state.tab === 'averages') render();
+    await loadAverages();
+  }catch(e){
+    showToast('Could not load Averages: ' + (e.message || e), true);
+  }
+}
+async function exportReportsFromSettings(){
+  try{
+    await ensureAveragesModule();
+    await exportReportsToExcel();
+  }catch(e){
+    showToast('Could not export: ' + (e.message || e), true);
   }
 }
 
@@ -895,6 +933,7 @@ function switchTab(tab, fromBack){
   if(tab === 'supplies') loadSuppliesForCurrentTab();
   if(tab === 'report') fetchReport();
   if(tab === 'expenses') fetchExpenses();
+  if(tab === 'averages') loadAveragesForTab();
   if(tab === 'members'){ fetchMembers(); loadProfileForMembersTab(); }
   if(tab === 'bank') loadBankForTab();
   if(tab === 'settings') fetchAppUsers();
@@ -1212,6 +1251,18 @@ function saleItemLabel(i){
   return `${i.qty}\u00D7 ${i.product_name}` + (i.is_free ? ' \uD83C\uDF81FREE' + (i.free_remarks ? ' (' + escapeHtml(i.free_remarks) + ')' : '') : '');
 }
 
+// Detect once whether sales has member_id / member_name (sale-member.sql). Without them, checkout works as before.
+async function checkSaleMemberColumn(){
+  try{
+    const res = await fetch(`${state.supaUrl}/rest/v1/sales?select=member_id&limit=1`, { headers: supaHeaders() });
+    state.saleMemberCol = res.ok;
+  }catch(e){ state.saleMemberCol = false; }
+  try{
+    const r2 = await fetch(`${state.supaUrl}/rest/v1/sales?select=member_name&limit=1`, { headers: supaHeaders() });
+    state.saleMemberNameCol = r2.ok;
+  }catch(e){ state.saleMemberNameCol = false; }
+}
+
 // Detect once whether the consignments table has a member_id column (see Settings SQL)
 async function checkConsignMemberColumn(){
   try{
@@ -1419,7 +1470,12 @@ async function checkout(recv){
   try{
     const saleRes = await fetch(`${state.supaUrl}/rest/v1/sales`, {
       method:'POST', headers: supaHeaders(),
-      body: JSON.stringify([recv ? { total, is_receivable: true, buyer_name: recv.name, receivable_remarks: recv.remarks || null } : { total }])
+      body: JSON.stringify([(()=>{
+        // itala kung aling Member ang bumili (kung may napiling Member at na-run ang sale-member.sql)
+        const mm = (state.saleMemberCol && state.saleMemberId) ? state.members.find(x => x.id === state.saleMemberId) : null;
+        const tag = mm ? Object.assign({ member_id: mm.id }, state.saleMemberNameCol ? { member_name: mm.full_name } : {}) : {};
+        return Object.assign(recv ? { total, is_receivable: true, buyer_name: recv.name, receivable_remarks: recv.remarks || null } : { total }, tag);
+      })()])
     });
     if(!saleRes.ok) throw new Error('Checkout failed');
     const saleRows = await saleRes.json();
@@ -2923,6 +2979,11 @@ function renderAdminSettings(){
     <div class="setup-note">I-download ang kopya ng LAHAT ng data sa isang Excel file: Products, Members, Sales, Sale Items, Consignments, Consignment Items, Ledger, Product Logs, at Users. Gawin ito paminsan-minsan (halimbawa, linggu-linggo) at itago ang file sa Google Drive o i-email sa sarili.</div>
     <button class="primary" id="btn-backup" style="width:auto; padding:9px 18px; margin-top:10px;">Download backup (Excel)</button>
     <div style="margin-top:10px; font-size:13px; color:var(--ink-dim);">${lastBackupText()}</div>
+  </div>
+  <div class="panel" style="max-width:520px; margin-bottom:16px;">
+    <h2>Reports + Inventory (Excel)</h2>
+    <div class="setup-note">Isang Excel na may Average ng benta kada buwan, Average ng kilo kada group (Tablea, Spread, atbp.), Products at Supplies inventory, Members, Bank accounts, Ledger, Utang, at Consignment. Ito ay para sa pagbabasa at pag-report (hiwalay sa Backup sa itaas).</div>
+    <button class="primary" id="btn-export-reports" style="width:auto; padding:9px 18px; margin-top:10px;">Download reports + inventory (Excel)</button>
   </div>
   <div class="panel" style="max-width:520px;">
     <h2>Manage users</h2>
@@ -4772,6 +4833,8 @@ function render(){
     body = renderReport();
   } else if(state.tab === 'expenses'){
     body = renderExpenses();
+  } else if(state.tab === 'averages'){
+    body = (typeof renderAverages === 'function') ? renderAverages() : '<div class="panel"><h2>Averages</h2><div class="setup-note">Loading...</div></div>';
   } else {
     body = renderHistory();
   }
@@ -4789,11 +4852,12 @@ function render(){
       // discount is a fixed peso amount per product, set in the Products tab
       '<button data-tab="members" class="' + active('members') + '"' + gOff('members') + '>Members</button>' +
       '<div class="nav-group' + (state.reportMenuOpen ? ' open' : '') + '">' +
-        '<button data-group="report" class="' + (['items','report','expenses','history'].indexOf(state.tab) >= 0 ? 'active' : '') + '" aria-haspopup="true" aria-expanded="' + (state.reportMenuOpen ? 'true' : 'false') + '">Report &#9662;</button>' +
+        '<button data-group="report" class="' + (['items','report','expenses','history','averages'].indexOf(state.tab) >= 0 ? 'active' : '') + '" aria-haspopup="true" aria-expanded="' + (state.reportMenuOpen ? 'true' : 'false') + '">Report &#9662;</button>' +
         '<div class="nav-sub">' +
           '<button data-tab="items" class="' + active('items') + '">Daily</button>' +
           '<button data-tab="report" class="' + active('report') + '">Monthly</button>' +
           '<button data-tab="expenses" class="' + active('expenses') + '">Expenses</button>' +
+          '<button data-tab="averages" class="' + active('averages') + '">Averages</button>' +
           '<button data-tab="history" class="' + active('history') + '">History</button>' +
         '</div>' +
       '</div>' +
@@ -5420,6 +5484,9 @@ function render(){
   if(typeof bindSupplies === 'function') bindSupplies(app);
   if(typeof bindMemberProfile === 'function') bindMemberProfile(app);
   if(typeof bindBank === 'function') bindBank(app);
+  if(typeof bindAverages === 'function') bindAverages(app);
+  const exportReportsBtn = document.getElementById('btn-export-reports');
+  if(exportReportsBtn) exportReportsBtn.addEventListener('click', exportReportsFromSettings);
 }
 
 async function init(){
