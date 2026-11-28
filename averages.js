@@ -16,6 +16,8 @@ Object.assign(state, {
   avgGroupsText: 'Tablea, Spread',
   avgTopBy: 'value',     // 'value' | 'pcs' | 'kg'
   avgTop: null,          // { rows, untagged } kapag na-compute na
+  avgTagPick: {},        // sale id -> member id na napili sa dropdown
+  avgTagBusy: '',
   avgExporting: false
 });
 try{
@@ -25,6 +27,9 @@ try{
 
 let avgRawSales = [];
 let avgRawConsign = [];
+let avgConsignSaleIds = null;   // Set ng sale id na galing sa Consignment (para hindi mabilang nang dalawang beses)
+let avgSkip = {};
+try{ (JSON.parse(localStorage.getItem('ccfaco_avg_skip') || '[]') || []).forEach(id => { avgSkip[id] = 1; }); }catch(e){}
 const AVG_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const AVG_MONTHS_LONG = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
@@ -32,6 +37,8 @@ const AVG_MONTHS_LONG = ['January', 'February', 'March', 'April', 'May', 'June',
 const AVG_UNIT = '(kgs?|kilos?|kilograms?|grams?|gms?|g)';
 const AVG_FRAC_RE = new RegExp('(\\d+)\\s*\\/\\s*(\\d+)\\s*' + AVG_UNIT + '(?![a-z])', 'i');
 const AVG_NUM_RE = new RegExp('(\\d+(?:[.,]\\d+)?)\\s*' + AVG_UNIT + '(?![a-z])', 'i');
+// "Tablea Per KG", "Tablea kilo": walang numero, ibig sabihin 1 kilo ang bawat isang binenta
+const AVG_PERKG_RE = /(?:^|[^a-z])(?:per\s*)?(?:kgs?|kilos?|kilograms?)(?![a-z])/i;
 
 function avgUnitToG(unit){
   return /^k/i.test(unit) ? 1000 : 1;
@@ -46,10 +53,11 @@ function avgParseWeightG(name){
   }
   m = s.match(AVG_NUM_RE);
   if(m) return Number(m[1].replace(',', '.')) * avgUnitToG(m[2]);
+  if(AVG_PERKG_RE.test(s)) return 1000;      // per kilo: 1 kg bawat qty
   return null;
 }
 function avgStripWeight(name){
-  return String(name || '').replace(AVG_FRAC_RE, ' ').replace(AVG_NUM_RE, ' ')
+  return String(name || '').replace(AVG_FRAC_RE, ' ').replace(AVG_NUM_RE, ' ').replace(new RegExp(AVG_PERKG_RE.source.replace('(?:^|[^a-z])', '\\b'), 'ig'), ' ')
     .replace(/[-\u2013(),]+\s*$/g, ' ').replace(/\s+/g, ' ').trim();
 }
 function avgKeywords(){
@@ -147,10 +155,10 @@ async function avgFetchSales(y){
   const tail = `sale_items(${saleItemCols()})&created_at=gte.${ys}&created_at=lt.${ye}${notVoidedQ()}&order=created_at.asc,id.asc`;
   // kung wala pa ang member columns o utang columns, babalik sa mas simpleng select
   const attempts = [
-    'created_at,total,member_id,member_name,buyer_name,is_receivable,',
-    'created_at,total,member_id,buyer_name,is_receivable,',
-    'created_at,total,buyer_name,is_receivable,',
-    'created_at,total,'
+    'id,created_at,total,member_id,member_name,buyer_name,is_receivable,',
+    'id,created_at,total,member_id,buyer_name,is_receivable,',
+    'id,created_at,total,buyer_name,is_receivable,',
+    'id,created_at,total,'
   ];
   let lastErr;
   for(const cols of attempts){
@@ -169,6 +177,13 @@ async function loadAverages(){
     const rows = await avgFetchSales(y);
     let cons = [];
     try{ cons = await fetchAllRows('consignments', 'select=*,consignment_items(*)&order=created_at.asc'); }catch(e){ cons = []; }
+    if(isAdmin()){
+      try{
+        const led = await fetchAllRows('ledger_entries', 'select=sale_id&sale_id=not.is.null&details=ilike.Consignment*&order=created_at.asc');
+        avgConsignSaleIds = {};
+        led.forEach(e => { if(e.sale_id) avgConsignSaleIds[e.sale_id] = 1; });
+      }catch(e){ avgConsignSaleIds = null; }
+    }
     if(state.avgYear === y){
       avgRawSales = rows;
       avgRawConsign = cons;
@@ -255,6 +270,79 @@ function avgRecomputeTop(){
   state.avgTop = avgTopCompute(avgRawConsign, state.avgYear, null, avgRawSales);
 }
 
+/* ----- Mga lumang benta na may discount pero walang naka-tag na member ----- */
+function avgMemberSaleCandidates(){
+  if(!isAdmin() || avgConsignSaleIds === null) return null;
+  const members = state.members || [];
+  const byName = {}, dup = {};
+  members.forEach(m => { const k = avgNameKey(m.full_name); if(!k) return; if(byName[k] && byName[k] !== m.id) dup[k] = 1; byName[k] = m.id; });
+  const prod = {};
+  (state.products || []).forEach(p => { prod[String(p.name || '').trim().toLowerCase()] = p; });
+  const out = [];
+  avgRawSales.forEach(s => {
+    if(!s.id || s.member_id || avgSkip[s.id] || avgConsignSaleIds[s.id]) return;
+    if(!(Number(s.total) > 0)) return;
+    if(s.is_receivable && s.buyer_name){                       // utang na tugma sa pangalan ng member: bilang na
+      const k = avgNameKey(s.buyer_name);
+      if(byName[k] && !dup[k]) return;
+    }
+    let disc = 0, strong = 0;
+    (s.sale_items || []).forEach(i => {
+      if(i.is_free) return;
+      const p = prod[String(i.product_name || '').trim().toLowerCase()];
+      if(!p) return;
+      const price = Number(i.price) || 0, base = Number(p.price) || 0, d = Number(p.discount) || 0;
+      if(price < base - 0.005){
+        disc++;
+        if(d > 0 && Math.abs(price - Math.max(0, base - d)) < 0.011) strong++;
+      }
+    });
+    if(disc) out.push({ sale: s, strong: strong === disc });
+  });
+  return out.sort((x, y) => String(y.sale.created_at).localeCompare(String(x.sale.created_at)));
+}
+
+// Kabuuan ng mga benta na malamang member (may discount) pero hindi alam kung sino
+function avgUnknownMemberSummary(){
+  const cands = avgMemberSaleCandidates();
+  if(!cands) return null;
+  const strong = cands.filter(c => c.strong);
+  const sum = { n: strong.length, value: 0, pcs: 0, kg: 0, maybe: cands.length - strong.length };
+  strong.forEach(c => {
+    sum.value += Number(c.sale.total) || 0;
+    (c.sale.sale_items || []).forEach(i => {
+      if(i.is_free) return;
+      const q = Number(i.qty) || 0;
+      if(!q) return;
+      sum.pcs += q;
+      const w = avgParseWeightG(i.product_name);
+      if(w !== null) sum.kg += (w * q) / 1000;
+    });
+  });
+  return sum;
+}
+
+async function avgTagSale(saleId){
+  const mid = state.avgTagPick[saleId];
+  if(!mid){ showToast('Pumili muna ng member.', true); return; }
+  const m = (state.members || []).find(x => x.id === mid);
+  state.avgTagBusy = saleId; render();
+  try{
+    const body = { member_id: mid };
+    if(state.saleMemberNameCol && m) body.member_name = m.full_name;
+    await patchRows('sales?id=eq.' + encodeURIComponent(saleId), body, true);
+    const s = avgRawSales.find(x => x.id === saleId);
+    if(s){ s.member_id = mid; if(m) s.member_name = m.full_name; }
+    delete state.avgTagPick[saleId];
+    avgRecomputeTop();
+    showToast('Na-tag kay ' + (m ? m.full_name : 'member') + '.');
+  }catch(e){
+    showToast('Hindi na-save: ' + (e.message || e), true);
+  }
+  state.avgTagBusy = '';
+  render();
+}
+
 /* ----- screen ----- */
 function avgMonthStatus(d, m){
   if(d.year > d.curY || (d.year === d.curY && m > d.curM)) return 'wala pa';
@@ -330,7 +418,7 @@ function renderAverages(){
   }).join('') : '<div class="setup-note">Wala pang nabentang product ngayong ' + y + '.</div>';
 
   const noW = d.noWeight.length
-    ? '<div class="setup-note" style="margin-top:12px;"><b>Mga product na walang timbang sa pangalan</b> (hindi nabilang sa kg). Ilagay ang timbang sa pangalan, hal. "Tablea 250g":<br>' +
+    ? '<div class="setup-note" style="margin-top:12px;"><b>Mga product na walang timbang sa pangalan</b> (hindi nabilang sa kg). Ilagay ang timbang sa pangalan, hal. "Tablea 250g" (o "Per KG" kung kilo ang bawat isa):<br>' +
       d.noWeight.slice(0, 15).map(x => escapeHtml(x.name) + ' (' + avgNum(x.pcs, 0) + ' pcs)').join(', ') +
       (d.noWeight.length > 15 ? ', at ' + (d.noWeight.length - 15) + ' pa' : '') + '</div>' : '';
 
@@ -367,11 +455,45 @@ function renderAverages(){
       '<div style="display:flex; gap:8px; margin:6px 0 10px; flex-wrap:wrap;">' + tab('value', 'Ayon sa halaga') + tab('pcs', 'Ayon sa pcs') + tab('kg', 'Ayon sa kilo') + '</div>' +
       '<div class="setup-note" style="margin-bottom:8px;">Lahat ng members, mula pinakamarami hanggang pinakakaunti. Kasama ang <b>nabenta nila sa Consign</b> at ang <b>binili nila sa Sell</b> (cash at utang). Ang <b style="color:var(--gold);">Top 10</b> ay may gintong border.</div>' +
       '<div class="product-list">' + list + '</div>' +
+      (() => {
+        const u = avgUnknownMemberSummary();
+        if(!u || !u.n) return '';
+        return '<div class="product-row" style="display:block; cursor:default; border-style:dashed; margin-top:10px;"><div style="display:flex; justify-content:space-between; gap:10px;">' +
+          '<div><div class="name">Hindi alam kung sinong member</div><div class="meta">' + u.n + ' benta na may member discount &middot; ' + avgNum(u.pcs, 0) + ' pcs &middot; ' + avgNum(u.kg) + ' kg' + (u.maybe ? ' &middot; +' + u.maybe + ' posibleng pa' : '') + '</div>' +
+          '<div class="meta">Hindi kasama sa ranking. I-tag sa ibaba kung alam mo kung sino.</div></div><div class="price">' + money(u.value) + '</div></div></div>';
+      })() +
       '<div class="setup-note" style="margin-top:10px;">Consign: mga consignment na naka-tag sa member (nabenta na, hindi void), ayon sa taon ng settlement. Binili: mga benta sa Sell na may napiling Member, at ang mga utang na tugma ang pangalan sa member. Ang mga cash na benta na naitala <b>bago</b> ang pag-install ng sale-member.sql ay walang tala kung sinong member ang bumili, kaya hindi kasama.' +
       (state.avgTop.untagged ? ' May ' + avgNum(state.avgTop.untagged, 0) + ' pcs na nabenta sa consignment na hindi naka-tag sa member.' : '') + '</div></div>';
   }
 
-  return head + salesPanel + kgPanel + topPanel;
+  let tagPanel = '';
+  if(isAdmin()){
+    const cands = avgMemberSaleCandidates();
+    let body;
+    if(!state.saleMemberCol) body = '<div class="setup-note">I-run muna ang <b>sale-member.sql</b> sa Supabase, tapos i-refresh ang app.</div>';
+    else if(cands === null) body = '<div class="setup-note">Hindi mabasa ang Ledger para malaman kung alin ang galing sa Consignment, kaya hindi muna ito maipapakita.</div>';
+    else if(!cands.length) body = '<div class="setup-note">Wala nang benta na may discount at walang member ngayong ' + y + '. \u2713</div>';
+    else {
+      const opts = '<option value="">Pumili ng member...</option>' + (state.members || []).slice().sort((p, q) => String(p.full_name).localeCompare(String(q.full_name)))
+        .map(m => '<option value="' + m.id + '">' + escapeHtml(m.full_name) + '</option>').join('');
+      body = '<div class="setup-note" style="margin-bottom:8px;">' + cands.length + ' benta ang may discount pero walang naka-tag na member. Piliin kung sino ang bumili at pindutin ang I-tag, para mabilang sa Top Members. Kung hindi member ang bumili, pindutin ang "Hindi member".</div>' +
+        '<div class="product-list">' + cands.slice(0, 30).map(c => {
+          const s = c.sale, sel = state.avgTagPick[s.id] || '';
+          const items = (s.sale_items || []).map(i => (Number(i.qty) || 0) + '\u00D7 ' + escapeHtml(i.product_name) + ' @' + money(i.price)).join(', ');
+          return '<div class="product-row" style="display:block; cursor:default;">' +
+            '<div style="display:flex; justify-content:space-between; gap:10px;"><div><div class="meta" style="margin:0;">' + escapeHtml(avgDate(s.created_at)) + (c.strong ? ' &middot; <span class="tag open">malamang member</span>' : ' &middot; <span class="tag">posibleng member</span>') + '</div>' +
+            '<div class="name" style="font-size:14px;">' + items + '</div></div><div class="price">' + money(s.total) + '</div></div>' +
+            '<div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">' +
+              '<select class="field-input" data-avg-tagsel="' + s.id + '" style="flex:1; min-width:150px; padding:6px 8px;">' + opts.replace('value="' + sel + '"', 'value="' + sel + '" selected') + '</select>' +
+              '<button class="primary" data-avg-tagsave="' + s.id + '" style="width:auto; padding:6px 14px; margin-top:0;" ' + (state.avgTagBusy ? 'disabled' : '') + '>' + (state.avgTagBusy === s.id ? 'Saving...' : 'I-tag') + '</button>' +
+              '<button class="ghost" data-avg-tagskip="' + s.id + '" style="width:auto; margin-top:0;">Hindi member</button>' +
+            '</div></div>';
+        }).join('') + '</div>' + (cands.length > 30 ? '<div class="setup-note" style="margin-top:8px;">Unang 30 ang ipinapakita. Pagkatapos mong i-tag ang mga ito, lalabas ang susunod.</div>' : '');
+    }
+    tagPanel = '<div class="panel" style="margin-bottom:16px;"><h2>Itala ang Member sa mga benta na may discount</h2>' + body + '</div>';
+  }
+
+  return head + salesPanel + kgPanel + topPanel + tagPanel;
 }
 
 function bindAverages(app){
@@ -382,6 +504,13 @@ function bindAverages(app){
     loadAverages();
   }));
   app.querySelectorAll('[data-avg-topby]').forEach(b => b.addEventListener('click', () => { state.avgTopBy = b.dataset.avgTopby; render(); }));
+  app.querySelectorAll('[data-avg-tagsel]').forEach(sel => sel.addEventListener('change', () => { state.avgTagPick[sel.dataset.avgTagsel] = sel.value; }));
+  app.querySelectorAll('[data-avg-tagsave]').forEach(b => b.addEventListener('click', () => avgTagSale(b.dataset.avgTagsave)));
+  app.querySelectorAll('[data-avg-tagskip]').forEach(b => b.addEventListener('click', () => {
+    avgSkip[b.dataset.avgTagskip] = 1;
+    try{ localStorage.setItem('ccfaco_avg_skip', JSON.stringify(Object.keys(avgSkip))); }catch(e){}
+    render();
+  }));
   const gin = document.getElementById('avg-groups');
   if(gin) gin.addEventListener('input', () => { state.avgGroupsText = gin.value; });
   const gbtn = document.getElementById('btn-avg-groups');
@@ -500,6 +629,8 @@ async function exportReportsToExcel(){
         'Bilang ng consignment': r.n, 'Bilang ng bili': r.bn
       };
     });
+    const unk = avgUnknownMemberSummary();
+    if(unk && unk.n) topRows.push({ Rank: '', Member: 'Hindi alam kung sinong member (may member discount, hindi kasama sa ranking)', 'Top 10': '', 'Kabuuang halaga': Math.round(unk.value * 100) / 100, 'Nabenta sa Consign': '', 'Binili (Sell)': Math.round(unk.value * 100) / 100, 'Sa utang (kasama sa Binili)': '', Pcs: unk.pcs, Kilo: Math.round(unk.kg * 1000) / 1000, 'Bilang ng consignment': '', 'Bilang ng bili': unk.n });
     if(topAll.untagged) topRows.push({ Rank: '', Member: 'Consignment na hindi naka-tag sa member', 'Top 10': '', 'Kabuuang halaga': '', 'Nabenta sa Consign': '', 'Binili (Sell)': '', 'Sa utang (kasama sa Binili)': '', Pcs: topAll.untagged, Kilo: '', 'Bilang ng consignment': '', 'Bilang ng bili': '' });
     add('Top Members', avgSheet(topRows, 'Wala pang members'), topRows.length, consigns.error);
     if(d.noWeight.length)
